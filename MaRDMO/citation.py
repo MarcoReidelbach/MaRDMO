@@ -88,7 +88,7 @@ def GetCitation(doi):
         months = {'jan': '01','feb': '02','mar': '03','apr': '04','may': '05','jun': '06',
                   'jul': '07','aug': '08','sep': '09','oct': '10','nov': '11','dec': '12'}
         try:
-            citation_dict['month']=months[citation_dict['month'].lower()]
+            citation_dict['month']=months[citation_dict['month'].lower()[:3]]
         except:
             #If month already number establish two digit format
             if len(citation_dict['month']) == 1:
