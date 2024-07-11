@@ -1,0 +1,21 @@
+{% extends 'core/page.html' %}
+{% load i18n %}
+
+{% block page %}
+
+    <html>
+    	<body>
+            <br><br><br><br><br><br><br><br><br><br><br>
+            <div align='center'>
+            	<p>
+            	    <span style="font-family:'Arial';color:DarkSlateBlue;font-size:100px;"><b>Ma</b></span>
+            	    <span style="font-family:'Arial';color:white;background-color:DarkSlateBlue;font-size:100px;"><b>RDMO</b></p></span>
+                </p>
+                <br><br><br>
+                <p style="color:DarkSlateBlue;font-size:30px;">You're Workflow has been added to the MaRDI Portal.</p>
+                <p style="color:DarkSlateBlue;font-size:30px;"><a href="{{ WikiLink }}" style="color:orange;">Wiki Page</a> - <a href="{{ KGLink }}" style="color:orange;">Knowledge Graph Entry</a></p>
+            </div>
+        </body>
+    </html>
+
+{% endblock %}

@@ -1,24 +1,31 @@
-import pypandoc
 import re
 import requests
+import os, json
+import time
 
 from django.http import HttpResponse
+from django.shortcuts import redirect, render, reverse
+from django.utils.translation import gettext_lazy as _
+from django.template import Template, Context
 
 from rdmo.projects.exports import Export
 from rdmo.views.utils import ProjectWrapper
 from rdmo.views.templatetags import view_tags
+from rdmo.domain.models import Attribute
 
 from wikibaseintegrator import wbi_login, WikibaseIntegrator
-from wikibaseintegrator.datatypes import ExternalID, Item, String, Time, MonolingualText
+from wikibaseintegrator.datatypes import ExternalID, Item, String, Time, MonolingualText, Quantity
 from wikibaseintegrator.wbi_enums import ActionIfExists
 from wikibaseintegrator.wbi_config import config as wbi_config
+from wikibaseintegrator.models import Qualifiers
 
 from .para import *
 from .config import *
 from .citation import *
 from .id import *
 from .sparql import *
-from .display import *
+from .handlers import *
+from .mathmoddb import *
 
 try:
     # Get login credentials if available 
@@ -32,36 +39,26 @@ class MaRDIExport(Export):
     def render(self):
         '''Function that renders User answers to MaRDI template
            (adjusted from csv export)'''
- 
+        
 ### Check if MaRDI Questionaire is used ###########################################################################################################################################################
-        if str(self.project.catalog)[-5:] != 'MaRDI':
-            return HttpResponse(response_temp.format(err1).format(self.project.catalog))
+
+        if str(self.project.catalog)[-6:] != 'MaRDMO':
+            return render(self.request,'MaRDMO/workflowError.html', {
+                'error': 'Questionnaire \'{}\' not suitable for MaRDI Export!'.format(str(self.project.catalog).split('/')[-1])
+                }, status=200)
+
+### Load MaRDMO Options ##########################################################################################################################################################################
+
+        path = os.path.join(os.path.dirname(__file__), 'data', 'mathmoddb.json')
+        with open(path, "r") as json_file:
+            mathmoddb = json.load(json_file)
+
+### Gather all User Answers in Dictionary ########################################################################################################################################################
         
-### Gather all User Answers in Dictionary (modified RDMO Code) ####################################################################################################################################
-
-        project_wrapper = ProjectWrapper(self.project, self.snapshot)
+        answers ={}
+        for label, info in questions.items():
+            answers = self.get_answer(answers,**info)
         
-        data = {}
-        for question in project_wrapper.questions:
-            set_prefixes = view_tags.get_set_prefixes({}, question['attribute'], project=project_wrapper)
-            for set_prefix in set_prefixes:
-                set_indexes = view_tags.get_set_indexes({}, question['attribute'], set_prefix=set_prefix,
-                                                        project=project_wrapper)
-                for set_index in set_indexes:
-                    values = view_tags.get_values(
-                        {}, question['attribute'], set_prefix=set_prefix, set_index=set_index, project=project_wrapper)
-
-                    labels = view_tags.get_labels(
-                        {}, question, set_prefix=set_prefix, set_index=set_index, project=project_wrapper)
-                
-                    result = view_tags.check_element(
-                        {}, question, set_prefix=set_prefix, set_index=set_index, project=project_wrapper)
-
-                    if labels:
-                        data[question['attribute']+'_'+str(set_index)]=self.stringify_values(values)
-                    else:
-                        data[question['attribute']+'_0']=self.stringify_values(values)
-
        ###################################################################################################################################################
        ###################################################################################################################################################
        ##                                                                                                                                               ##
@@ -74,289 +71,621 @@ class MaRDIExport(Export):
        ###################################################################################################################################################
        ###################################################################################################################################################
 
-        
+              
         # If Workflow Documentation wanted
-        if data[dec[0][0]] in (dec[0][1],dec[0][2]):
-
+        if answers['Settings'].get('Documentation') == option['Documentation']:
 
 ### Checks for Workflow Documentation #############################################################################################################################################################
 
             # Login Credentials for MaRDI Portal Export
-            if data[dec[2][0]] == dec[2][2] and data[dec[3][0]] in (dec[3][1],dec[3][2]):
+            if answers['Settings']['Public'] == option['Public'] and answers['Settings']['Preview'] == option['No']:
                 if not (lgname and lgpassword):
                     #Stop if no Login Credentials are provided
-                    return HttpResponse(response_temp.format(err19))
+                    return render(self.request,'MaRDMO/workflowError.html', {
+                        'error': 'No permission to write to MaRDI Portal. Check Bot Credentials.'
+                        }, status=200)
 
-            # Research Objective Provided
-            res_obj=self.wikibase_answers(data,ws['obj'])[0] 
-            if not res_obj:
-                # Stop if no Research Objective is provided
-                return HttpResponse(response_temp.format(err20))
+            # Documentation Type
+            if answers['Settings'].get('DocumentationType')  == option['Workflow']:
             
-            # Workflow Type (THEO/EXP)
-            if data[dec[1][0]] not in (dec[1][1],dec[1][2],dec[1][3],dec[1][4]):
-                # Stop if no Workflow Type is chosen
-                return HttpResponse(response_temp.format(err5))
-            
-            # Identical Workflow on MaRDI Portal
-            if data[dec[2][0]] == dec[2][2] and data[dec[3][0]] in (dec[3][1],dec[3][2]):
-                if self.get_results(mardi_endpoint,mini.format('?qid',mbody.format(self.project.title.replace("'",r"\'"),res_obj.replace("'",r"\'")),'1'))[0]:
-                    # Stop if Workflow with similar Label and Description on MaRDI Portal
-                    return HttpResponse(response_temp.format(err18))
-                
-### Get Paper Information provided by User ########################################################################################################################################################
+                # Workflow Type (THEO/EXP)
+                if answers['Settings'].get('WorkflowType')  not in (option['Computation'], option['Analysis']): 
+                    # Stop if no Workflow Type is chosen
+                    return render(self.request,'MaRDMO/workflowError.html', {
+                        'error': 'Missing Workflow Type!'
+                        }, status=200)
 
-            paper=self.wikibase_answers(data,ws['doi'])[0]
+                # Research Objective Provided
+                if not answers['GeneralInformation'].get('ResearchObjective'):
+                    # Stop if no Research Objective is provided
+                    return render(self.request,'MaRDMO/workflowError.html', {
+                        'error': 'Missing Research Objective!'
+                        }, status=200)
 
-### MaRDI KG and Wikidata Queries #################################################################################################################################################################
-
-            # Initialize dictionaries for MaRDI KG (mq) and Wikidata (wq) queries
-            wq = {}
-            mq = {}
-
-            # If Portal integration wanted, get further publication information
-            if data[dec[2][0]] == dec[2][2] and data[dec[3][0]] in (dec[3][1],dec[3][2]):
-                # Extract Paper DOI
-                doi=re.split(':',paper)
-                
-                if doi[0] == 'Yes':
-                    
-                    if not doi[-1]:
-                        # Stop if no DOI provided
-                        return HttpResponse(response_temp.format(err6))
-                
-                    # Get Citation and Author Information
-                    orcid,string,cit=GetCitation(doi[-1])
-                    
-                    if not cit:
-                        # Stop if no Information available via DOI
-                        return HttpResponse(response_temp.format(err6))
-
-                    # Query Wikidata and MaRDI KG by all User Answers and Citation Information 
-                    wq, mq = self.sparql(data,ws,orcid,doi,cit)
-
-### Checkout Paper via DOI ########################################################################################################################################################################
-
-                    if mq['mqpub']["qid_doi"]["value"]:
-                        # If Paper with DOI on MaRDI Portal store QID
-                        paper_qid=mq['mqpub']["qid_doi"]["value"]
-
+                # Identical Workflow on MaRDI Portal
+                if answers['Settings']['Public'] == option['Public'] and answers['Settings']['Preview'] == option['No']: 
+                    # Evaluate user-defined Workflow Author Name and ID(s)
+                    if not answers['Creator'].get('Name'):
+                        # Stop if no Workflow Author Name provided
+                        return render(self.request,'MaRDMO/workflowError.html', {
+                            'error': 'Missing Name of Workflow Documentation Creator'
+                            }, status=200)
+                    if answers['Creator'].get('IDs'):
+                        # If ID(s) provided, check if they match the author ID(s) on MaRDI Portal. If yes, allow edits.
+                        creator_orcid_id = []; creator_zbmath_id = []
+                        orcid_creator = []; zbmath_creator = []
+                        for user_id in answers['Creator']['IDs'].values():
+                            user_id = user_id.split(':')
+                            if user_id[0] == 'orcid':
+                                creator_orcid_id.append(user_id[1])
+                                orcid_creator.extend([[answers['Creator']['Name'].split(',')[1]+' '+answers['Creator']['Name'].split(',')[0],user_id[1]]])
+                            elif user_id[0] == 'zbmath':
+                                creator_zbmath_id.append(user_id[1])
+                                zbmath_creator.extend([[answers['Creator']['Name'].split(',')[1]+' '+answers['Creator']['Name'].split(',')[0], user_id[1]]])
+                            else:
+                                # Stop if wrong ID type provided for Workflow author
+                                return render(self.request,'MaRDMO/workflowError.html', {
+                                    'error': 'Identifier of Workflow Documentation Creator not supported'
+                                    }, status=200)
                     else:
+                        # Stop if no ID(s) provided
+                        return render(self.request,'MaRDMO/workflowError.html', {
+                            'error': 'Missing Identifier of Workflow Documentation Creator'
+                            }, status=200)
+                
+                    # Check if Workflow with same Label and Description on MaRDI Portal, get workflow author credentials
+                    req = self.get_results(mardi_endpoint,
+                                           mini.format('?qid ?orcid ?zbmath',mbody2.format(self.project.title.replace("'",r"\'"),
+                                                                                           answers['GeneralInformation']['ResearchObjective'].replace("'",r"\'"),
+                                                                                           P8,P22,P23),'1'))[0]
+                    existing_workflow_qid = None
+                    if req.get('qid', {}).get('value'):
+                        # Store Workflow QID and Workflow Author  credentials
+                        existing_workflow_qid = req['qid']['value']
+                        workflow_author_orcid = req.get('orcid', {}).get('value')
+                        workflow_author_zbmath = req.get('zbmath', {}).get('value')
+                        if answers['Creator']['IDs']:
+                            # If ID(s) provided, check if they match the author ID(s) on MaRDI Portal. If yes, allow edits.
+                            edit_allowed = True
+                            for user_id in answers['Creator']['IDs'].values():
+                                user_id = user_id.split(':')
+                                if user_id[0] == 'orcid': 
+                                    if workflow_author_orcid:
+                                        if user_id[1] == workflow_author_orcid:
+                                            edit_allowed *= True
+                                        else:
+                                            edit_allowed *= False
+                                elif user_id[0] == 'zbmath': 
+                                    if workflow_author_zbmath:
+                                        if user_id[1] == workflow_author_zbmath:
+                                            edit_allowed *= True
+                                        else:
+                                            edit_allowed *= False
+                                else:
+                                    edit_allowed *= False
+                        if not edit_allowed:
+                            # Stop if Workflow with similar Label and Description on MaRDI Portal and edit is not allowed
+                            return render(self.request,'MaRDMO/workflowError.html', {
+                                'error': 'Workflow already exists on MaRDI Portal'
+                                }, status=200)
+                else:
+                    creator_orcid_id = ''; orcid_creator = ''
+                    creator_zbmath_id = ''; zbmath_creator = ''
+ 
+### If Portal Integration desired, check if Paper already exists on MaRDI Portal or Wikidata  #####################################################################################################
 
-                        # If no Paper with DOI on MaRDI Portal, check if Paper with DOI on Wikidata
-                        if wq['wqpub']["qid_doi"]["value"]:
+                # If Portal integration wanted, get further publication information
+                if answers['Settings']['Public'] == option['Public'] and answers['Settings']['Preview'] == option['No']:
+                    if answers['Publication']['Exists'][0] == option['YesText']:
+                        # Extract Paper DOI
+                        doi=re.split(':', answers['Publication']['Exists'][1],1)
 
-                            # If on Wikidata check if Paper with same label and description is on MaRDI Portal
-                            if mq['mqpub']["qid_ch1"]["value"]:
-                                # If Paper exists on MaRDI Portal store QID.
-                                paper_qid=mq['mqpub']["qid_ch1"]["value"]
+                        if doi[0] == 'doi':
+                            
+                            if not doi[-1]:
+                                # Stop if no DOI provided
+                                return render(self.request,'MaRDMO/workflowError.html', {
+                                    'error': 'Missing DOI of related Publication!'
+                                    }, status=200)
+
+                            if not answers['Publication']['Info']:
+                                # Stop if no Information available via DOI
+                                return render(self.request,'MaRDMO/workflowError.html', {
+                                    'error': 'DOI for related Publication returns no Information!'
+                                    }, status=200)
+
+                            # Get Publication ID, Label and Description
+                            answers['Publication']['Info'] = answers['Publication']['Info'].split(' <|> ')
+                
+                            if re.match(r"mardi:Q[0-9]+", answers['Publication']['Info'][0]):
+                                # If Paper with DOI on MaRDI Portal store QID
+                                paper_qid= answers['Publication']['Info'][0].split(':')[1]
+
+                            elif re.match(r"wikidata:Q[0-9]+", answers['Publication']['Info'][0]): 
+                                # If Paper with DOI on Wikidata, generate dummy entry  store QID
+                                paper_qid = self.find_item(answers['Publication']['Info'][1], answers['Publication']['Info'][2])
+                                if not paper_qid:
+                                    paper_qid= self.entry(answers['Publication']['Info'][1], answers['Publication']['Info'][2], [(ExternalID, answers['Publication']['Info'][0].split(':')[1], P2)])
 
                             else:
-                                # If Paper only on Wikidata, generate Dummy Entry (i.e. Wikidata Label, Description, QID Mapping) and store QID. 
-                                paper_qid=self.entry(wq['wqpub']["label_doi"]["value"],wq['wqpub']["quote_doi"]["value"],[(ExternalID,wq['wqpub']["qid_doi"]["value"],P2)])
-
-                        else:
-
-### Checkout Paper via Title ######################################################################################################################################################################
-
-                            # If Title in Citation
-                            if cit['title']:
-
-                                if mq['mqpub']["qid_tit"]["value"]:
-                                    # If Paper with Title on MaRDI Portal store QID
-                                    paper_qid=mq['mqpub']["qid_tit"]["value"]
-
-                                else:
-
-                                    # If no Paper with Title on MaRDI Portal, check if Paper with Title on Wikidata
-                                    if wq['wqpub']["qid_tit"]["value"]:
-                                        # If Paper only on Wikidata, generate Dummy Entry (i.e. Wikidata Label, Description, QID Mapping) and store QID.
-                                        paper_qid=self.entry(wq['wqpub']["label_tit"]["value"],wq['wqpub']["quote_tit"]["value"],[(ExternalID,wq['wqpub']["qid_tit"]["value"],P2)])
-
-                                    else:
-
+                        
 ### Create New Publication Entry ##################################################################################################################################################################
+### Prepare User edited Authors  ##################################################################################################################################################################
+                        
+                                orcid_ids = []
+                                orcid_authors = []
+                                zbmath_ids = []
+                                zbmath_authors = []
+                                authors_remove = []
+                        
+                                # Identify Authors with ID added by User
+                                other_authors = list(answers['Publication'].get('All Authors',{}).values())[len(list(answers['Publication'].get('Identified Authors',{}).values())):]
+                    
+                                for author in other_authors:
+                                    try:
+                                        author_ids = re.search('\((.*)\)',author).group(1)
+                                    except:
+                                        author_ids = ''
+                            
+                                    for author_id in author_ids.split('; '):
+                                        if author_id.split(':')[0] == 'orcid':
+                                            orcid_ids.append(author_id.split(':')[1])
+                                            orcid_authors.append([author.split(' (')[0],author_id.split(':')[1]])
+                                            authors_remove.append(author)
+                                        elif author_id.split(':')[0] == 'zbmath':
+                                            zbmath_ids.append(author_id.split(':')[1])
+                                            zbmath_authors.append([author.split(' (')[0],author_id.split(':')[1]])
+                                            authors_remove.append(author)
+                        
+                                # Remove Authors with ID added by User from non-ID Author List
+                                for author in authors_remove:
+                                    try:
+                                        other_authors.remove(author)
+                                    except ValueError:
+                                        pass
+                         
+                                author_dict_merged = Author_Search(orcid_ids, zbmath_ids, orcid_authors, zbmath_authors)
 
-### Add Authors of Paper with ORCID ID to MaRDI Portal ############################################################################################################################################
+                                # Store Publication Authors from Citation via ORCID and zbMath
+                                answers['Publication'].setdefault('Identified Authors',{})
+                                for idx, (author_id, author_data) in enumerate(author_dict_merged.items()):
+                                    if author_data['mardiQID']:
+                                        answers['Publication']['Identified Authors'].update({f"n{idx}":f"mardi:{author_data['mardiQID']}"})
+                                    elif author_data['wikiQID']:
+                                        answers['Publication']['Identified Authors'].update({f"n{idx}":f"wikidata:{author_data['wikiQID']} <|> {author_data['wikiLabel']} <|> {author_data['wikiDescription']}"})
+                                    else:
+                                        if author_data['orcid']:
+                                            orcid_info = f"orcid:{author_data['orcid']}"
+                                            if author_data['zbmath']:
+                                                orcid_info += f"; zbmath:{author_data['zbmath']}"
+                                            answers['Publication']['Identified Authors'].update({f"n{idx}":f"{orcid_info} <|> {author_id} <|> researcher (ORCID {author_data['orcid']})"})
+                                        elif author_data['zbmath']:
+                                            answers['Publication']['Identified Authors'].update({f"n{idx}":f"zbmath:{author_data['zbmath']} <|> {author_id} <|> researcher (zbMath {author_data['zbmath']})"})
 
-                                        author_qids=[]
-                                        for i,aut in enumerate(orcid):
-                                            # If authors not on MaRDI Portal, add them.
-                                            author_qids.append(self.paper_prop_entry(wq['wqaut'+str(i)],mq['mqaut'+str(i)],[aut[0],'researcher',
-                                                                                     [(Item,Q7,P4),(Item,Q8,P21),(ExternalID,aut[1],P22)]]))
-                                    
-### Add Language of Paper to MaRDI Portal ######################################################################################################################################################### 
+### Add Authors, Language and Journal of Paper to MaRDI Portal #####################################################################################################################################
+                        
+                                author_qids = self.Entry_Generator_Paper_Supplements(answers['Publication']['Identified Authors'],
+                                                                                     [(Item, Q7, P4), (Item, Q8, P21)],
+                                                                                     True)
+                         
+                                language_qids = self.Entry_Generator_Paper_Supplements({'Language':answers['Publication'].get('Language')},
+                                                                                       [(Item, Q11, P4)],
+                                                                                       False)
 
-                                        if cit['language']:
-                                            # If language not on MaRDI Portal, add it.
-                                            cit['language']=self.paper_prop_entry(wq['wqlan'],mq['mqlan'],[lang_dict[cit['language']],'language',
-                                                                                  [(Item,Q11,P4)]])
+                                journal_qids = self.Entry_Generator_Paper_Supplements({'Journal':answers['Publication'].get('Journal')},
+                                                                                      [(Item, Q9, P4)],
+                                                                                      False)
 
-### Add Journal of Paper to MaRDI Portal ##########################################################################################################################################################
+### Add Paper to  MaRDI Portal ####################################################################################################################################################################
+                        
+                                paper_qid=self.entry(answers['Publication']['Info'][1], answers['Publication']['Info'][2], 
+                                                     [(Item, answers['Publication']['Type'].split(' <|> ')[0].split(':')[1], P4)] +
+                                                     [(Item, author, P8) for author in author_qids] +
+                                                     [(String, author, P9) for author in other_authors] +
+                                                     [(Item, language, P10) for language in language_qids] +
+                                                     [(Item, journal, P12) for journal in journal_qids] +
+                                                     [(MonolingualText, answers['Publication'].get('Title'), P7),
+                                                      (Time, answers['Publication'].get('Date')[:10]+'T00:00:00Z', P11),
+                                                      (String, answers['Publication'].get('Volume'), P13),
+                                                      (String, answers['Publication'].get('Issue'), P14),
+                                                      (String, answers['Publication'].get('Pages'), P15),
+                                                      (ExternalID,doi[-1].upper(),P16)])
+                        
+                        elif doi[0] == 'url':
+                            paper_qid = doi[1]
 
-                                        if cit['journal']:
-                                            # If journal not in Portal, create journal entry for publication                                                     
-                                            cit['journal']=self.paper_prop_entry(wq['wqjou'],mq['mqjou'],[cit['journal'],'scientific journal',
-                                                                                 [(Item,Q9,P4)]])
+                    else:
+                        # No DOI provided
+                        paper_qid=''
 
-### Create Publication Entry on MaRDI Portal #####################################################################################################################################################
+### Get Information of Workflow Creator and add Information to MaRDI Portal  ######################################################################################################################
+            
+                creator_dict_merged = Author_Search(creator_orcid_id, creator_zbmath_id, orcid_creator, zbmath_creator)
+                       
+                creators = {}
+                for idx, (author_id, author_data) in enumerate(creator_dict_merged.items()):
+                    if author_data['mardiQID']:
+                        creators.update({f"{idx}":f"mardi:{author_data['mardiQID']}"})
+                    elif author_data['wikiQID']:
+                        creators.update({f"{idx}":f"wikidata:{author_data['wikiQID']} <|> {author_data['wikiLabel']} <|> {author_data['wikiDescription']}"})
+                    else:
+                        if author_data['orcid']:
+                            orcid_info = f"orcid:{author_data['orcid']}"
+                            if author_data['zbmath']:
+                                orcid_info += f"; zbmath:{author_data['zbmath']}"
+                            creators.update({f"{idx}":f"{orcid_info} <|> {author_id} <|> researcher (ORCID {author_data['orcid']})"})
+                        elif author_data['zbmath']:
+                            creators.update({f"{idx}":f"zbmath:{author_data['zbmath']} <|> {author_id} <|> researcher (zbMath {author_data['zbmath']})"})
 
-                                        paper_qid=self.entry(cit['title'],'publication',[(Item,Q1 if cit['ENTRYTYPE'] == 'article' else Q10,P4)]+
-                                                             [(Item,aut,P8) for aut in author_qids]+[(String,aut,P9) for aut in string]+
-                                                             [(Item,cit['language'],P10),(Item,cit['journal'],P12),(MonolingualText,cit['title'],P7),
-                                                              (Time,cit['pub_date']+'T00:00:00Z',P11),(String,cit['volume'],P13),(String,cit['number'],P14),
-                                                              (String,cit['pages'],P15),(ExternalID,cit['doi'].upper(),P16)])  
-                else:
-                    # No DOI provided
-                    paper_qid=[]
+                creator_qids = self.Entry_Generator_Paper_Supplements(creators,
+                                                                     [(Item, Q7, P4), (Item, Q8, P21)],
+                                                                     True)
 
-            if not (wq and mq):
-                # Query Wikidata and MaRDI KG by all User Answers without Citation Information 
-                wq, mq = self.sparql(data,ws)
-
+### Refine User Answers via External Data Sources #################################################################################################################################################
+                
+                answers = self.refine(answers)
+                answers = ModelRetriever(answers,mathmoddb) 
+                
 ### Integrate related Model in MaRDI KG ###########################################################################################################################################################
+                 
+                models, answers, error = self.Entry_Generator('Models',              # Entry of Model
+                                                              [True,False,False],   # Generation wanted, QID Generation wanted, String Generation not wanted
+                                                              [Q3,P17],             # instance of mathematical model (Q3), main subject (P17)
+                                                              answers)              # refined user answers 
+                if error[0] == 0:
+                    # Stop if no Name and Description provided for new model entry
+                    return render(self.request,'MaRDMO/workflowError.html', {
+                        'error': 'Missing Name and/or Description of new Mathematical Model!'
+                        }, status=200)
 
-            models, data, error = self.Entry_Generator('mod','moms',                # Entry of Model (mod) with Main Subject (moms) as Subproperty
-                                                       [True,True,False],           # Generation wanted, QID Generation wanted, String Generation not wanted
-                                                       [Q3,P17],                    # instance of mathematical model (Q3), main subject (P17)
-                                                       wq,mq,data)                  # data from wikidata (wq), MaRDI KG (mq) and user (data)
-            
-            if error[0] == 0:
-                # Stop if no Name and Description provided for new model entry
-                return HttpResponse(response_temp.format(err21.format(error[1])))
+                elif error[0] == 1:
+                    #Stop if no main subject provided for new model entry
+                    return render(self.request,'MaRDMO/workflowError.html', {
+                        'error': 'Missing Main Subject of new Mathematical Model!'
+                        }, status=200)
 
-            elif error[0] == 1:
-                #Stop if no main subject provided for new model entry
-                return HttpResponse(response_temp.format(err9.format(error[1])))
-            
+                # Flag Tasks for Workflows
+                for key in answers['SpecificTask'].get('MathModID',{}):
+                    Id, label = answers['SpecificTask']['MathModID'][key].split(' <|> ')
+                    for key2 in answers['Task']:
+                        if Id == answers['Task'][key2].get('MathModID'):
+                            answers['Task'][key2].update({'Include':True})
+
+                # Add Symbols to Task Quantities
+                for tkey in answers['Task']:
+                    if answers['Task'][tkey].get('Include'):
+                        for tkey2 in answers['Task'][tkey]['Other2']:
+                            tvar = answers['Task'][tkey]['Other2'][tkey2].split(' <|> ')[1].rsplit(' ',1)[0]
+                            for mkey in answers['MathematicalFormulation']:
+                                for mkey2 in answers['MathematicalFormulation'][mkey]['Element']:
+                                    if answers['MathematicalFormulation'][mkey]['Element'][mkey2].get('Info',{}).get('Name'):
+                                        mvar = answers['MathematicalFormulation'][mkey]['Element'][mkey2].get('Info',{}).get('Name')
+                                    else:
+                                        mvar = answers['MathematicalFormulation'][mkey]['Element'][mkey2].get('Info',{}).get('QKName')
+                                    if tvar == mvar:
+                                        answers['Task'][tkey].setdefault('RelationQ',{}).update({tkey2:[answers['Task'][tkey]['Relation2'][tkey2],tvar,answers['MathematicalFormulation'][mkey]['Element'][mkey2]['Symbol']]})
+                 
 ### Integrate related Methods in MaRDI KG #########################################################################################################################################################
 
-            methods, data, error = self.Entry_Generator('met','mems',               # Entry of Methods (met) with Main Subject (mems) as Subproperty
-                                                        [True,True,False],          # Generation wanted, QID Generation wanted, String Generation not wanted
-                                                        [Q4,P17],                   # instance of method (Q4), main subject (P17)
-                                                        wq,mq,data)                 # data from wikidata (wq), MaRDI KG (mq) and user (data)
+                methods, answers, error = self.Entry_Generator('Method',            # Entry of Method with Main Subject
+                                                               [True,True,False],   # Generation wanted, QID Generation wanted, String Generation not wanted
+                                                               [Q4,P17],            # instance of method (Q4), main subject (P17)
+                                                               answers)             # refined user answers
 
-            if error[0] == 0:
-                # Stop if no Name and Description provided for new method entry
-                return HttpResponse(response_temp.format(err22.format(error[1])))
+                if error[0] == 0:
+                    # Stop if no Name and Description provided for new method entry
+                    return render(self.request,'MaRDMO/workflowError.html', {
+                        'error': 'Missing Name and/or Description of new Mathematical Method in Set {}!'.format(error[1])
+                        }, status=200)
             
-            elif error[0] == 1:
-                #Stop if no main subject provided for new method entry
-                return HttpResponse(response_temp.format(err17.format(error[1])))
+                elif error[0] == 1:
+                    #Stop if no main subject provided for new method entry
+                    return render(self.request,'MaRDMO/workflowError.html', {
+                        'error': 'Missing Main Subject of new Mathematical Method in Set {}!'.format(error[1])
+                        }, status=200)
 
+                for mkey in answers['Method']:
+                    i=0
+                    for pkey in answers['ProcessStep']:
+                        if answers['ProcessStep'][pkey].get('Method'):
+                            for pkey2 in answers['ProcessStep'][pkey]['Method']:
+                                if answers['Method'][mkey]['Name'] == answers['ProcessStep'][pkey]['Method'][pkey2]:
+                                    answers['Method'][mkey].setdefault('ProcessStep',{}).update({i:answers['ProcessStep'][pkey]['Name']})
+                                    i=i+1
+            
 ### Integrate related Softwares in MaRDI KG #######################################################################################################################################################
-
-            softwares, data, error = self.Entry_Generator('sof','pl',               # Entry of Softwares (sof) with Programming Languages (pl) as Subproperty
-                                                          [True,True,True],         # Generation wanted, QID Generation wanted, String Generation wanted
-                                                          [Q5,P19],                 # instance of software (Q5), programmed in (P19)
-                                                          wq,mq,data)               # data from wikidata (wq), MaRDI KG (mq) and user (data)
-
-            if error[0] == 0:
-                # Stop if no Name and Description provided for new software entry
-                return HttpResponse(response_temp.format(err23.format(error[1])))
             
-            elif error[0] == 1:
-                #Stop if no programming language provided for new software entry
-                return HttpResponse(response_temp.format(err16.format(error[1])))
+                softwares, answers, error = self.Entry_Generator('Software',        # Entry of Software with Programming Languages 
+                                                                 [True,True,True],  # Generation wanted, QID Generation wanted, String Generation wanted
+                                                                 [Q5,P19],          # instance of software (Q5), programmed in (P19)
+                                                                 answers)           # refined user answers
+
+                if error[0] == 0:
+                    # Stop if no Name and Description provided for new software entry
+                    return render(self.request,'MaRDMO/workflowError.html', {
+                        'error': 'Missing Name and/or Description of new Software in Set {}!'.format(error[1])
+                        }, status=200)
             
-### Integrate related Input Data Sets in MaRDI KG #################################################################################################################################################
+                elif error[0] == 1:
+                    #Stop if no programming language provided for new software entry
+                    return render(self.request,'MaRDMO/workflowError.html', {
+                        'error': 'Missing Programming Language(s) of new Software in Set {}!'.format(error[1])
+                        }, status=200)
+             
+                for skey in answers['Software']:
+                    for dkey in answers['ExperimentalDevice']:
+                        if answers['ExperimentalDevice'][dkey].get('SubProperty2'):
+                            for dkey2 in answers['ExperimentalDevice'][dkey]['SubProperty2']:
+                                if answers['Software'][skey]['Name'] == answers['ExperimentalDevice'][dkey]['SubProperty2'][dkey2]['Name'] and answers['Software'][skey]['Description'] == answers['ExperimentalDevice'][dkey]['SubProperty2'][dkey2]['Description']:
+                                    answers['ExperimentalDevice'][dkey]['SubProperty2'][dkey2]['ID'] = 'mardi:'+answers['Software'][skey]['mardiId']
+
+### Hardware/Devices #############################################################################################################################################################################
+
+                if answers['Settings']['WorkflowType'] == option['Computation']: 
+                
+                    # Hardware
+                    hardwares, answers, error = self.Entry_Generator('Hardware',                     # Entry of Hardware
+                                                                     [True,True,False],              # Generation wanted, QID Generation wanted, String Generation not wanted
+                                                                     [Q12,P26,P6,P4,P32,P2,P27,P31], # nothing
+                                                                     answers)                        # refined user answers  
+
+                    if error[0] == 0:
+                        # Stop if no Name and Description provided for new method entry
+                        return render(self.request,'MaRDMO/workflowError.html', {
+                            'error': 'Missing Name and/or Description of new Hardware in Set {}!'.format(error[1])
+                            }, status=200)
             
-            inputs, data, error = self.Entry_Generator('inp','',                    # Entry of Input Data Sets (inp) with no Subproperty
-                                                       [True,False,False],          # Generation wanted, QID Generation not wanted, String Generation not wanted
-                                                       [Q6,''],                     # instance of data set (Q6)
-                                                       wq,mq,data)                  # data from wikidata (wq), MaRDI KG (mq) and user (data)
+                elif answers['Settings']['WorkflowType'] == option['Analysis']:
+            
+                    # Devices
+                    devices, answers, error = self.Entry_Generator('ExperimentalDevice',           # Entry of Hardware
+                                                                   [True,True,False],              # Generation wanted, QID Generation wanted, String Generation not wanted
+                                                                   [Q13,P28,P6,P29,P30],           # nothing
+                                                                   answers)                        # refined user answers  
 
-            if error[0] == 0:
-                # Stop if no Name and Description provided for new input data set
-                return HttpResponse(response_temp.format(err24.format(error[1])))
+                    if error[0] == 0:
+                        # Stop if no Name and Description provided for new method entry
+                        return render(self.request,'MaRDMO/workflowError.html', {
+                            'error': 'Missing Name and/or Description of new Hardware in Set {}!'.format(error[1])
+                            }, status=200)
 
-### Integrate related Output Data Sets in MaRDI KG ################################################################################################################################################
+### Integrate related Data Sets in MaRDI KG #######################################################################################################################################################
+            
+                datas, answers, error = self.Entry_Generator('DataSet',            # Entry of Data Set
+                                                              [True,False,False],   # Generation wanted, QID Generation not wanted, String Generation not wanted
+                                                              [Q6,''],              # instance of data set (Q6)
+                                                              answers)              # refined user answers
 
-            outputs, data, error = self.Entry_Generator('out','',                   # Entry of Output Data Sets (out) with no Subproperty
-                                                        [True,False,False],         # Generation wanted, QID Generation not wanted, String Generation not wanted
-                                                        [Q6,''],                    # instance of data set (Q6)
-                                                        wq,mq,data)                 # data from wikidata (wq), MaRDI KG (mq) and user (data)
-
-            if error[0] == 0:
-                # Stop if no Name and Description provided for new output data set
-                return HttpResponse(response_temp.format(err25.format(error[1])))
-
+                if error[0] == 0:
+                    # Stop if no Name and Description provided for new input data set
+                    return render(self.request,'MaRDMO/workflowError.html', {
+                        'error': 'Missing Name of new Input Data in Set {}!'.format(error[1])
+                        }, status=200)
+       
+                for dkey in answers['DataSet']:
+                    for pkey in answers['ProcessStep']:
+                        if answers['ProcessStep'][pkey].get('Input'):
+                            for pkey2 in answers['ProcessStep'][pkey]['Input']:
+                                if answers['DataSet'][dkey]['Name'] == answers['ProcessStep'][pkey]['Input'][pkey2]:
+                                    answers['DataSet'][dkey].setdefault('Type',{}).update({0:'Input'})
+                        if answers['ProcessStep'][pkey].get('Output'):
+                            for pkey2 in answers['ProcessStep'][pkey]['Output']:
+                                if answers['DataSet'][dkey]['Name'] == answers['ProcessStep'][pkey]['Output'][pkey2]:
+                                    answers['DataSet'][dkey].setdefault('Type',{}).update({1:'Output'})
+        
 ### Integrate related non-mathematical Disciplines in MaRDI KG ####################################################################################################################################
+            
+                if answers['NonMathematicalDiscipline'].get(0,{}).get('ID'):
+                    answers.update({'NonMathematicalDiscipline':answers['NonMathematicalDiscipline'][0]['ID']})
+                else:
+                    return render(self.request,'MaRDMO/workflowError.html', {
+                        'error': 'Missing Non-Mathematical Disciplines of Workflow!'
+                        }, status=200)
 
-            disciplines, data, error = self.Entry_Generator('dis','',               # Entry of non-mathmatical Disciplines (dis) with no Subproperty
-                                                            [False,False,False],    # Generation not wanted, QID Generation not wanted, String Generation not wanted
-                                                            ['',''],                # nothing
-                                                            wq,mq,data)             # data from wikidata (wq), MaRDI KG (mq) and user (data)
+                disciplines, answers, error = self.Entry_Generator('NonMathematicalDiscipline',     # Entry of non-mathmatical Disciplines
+                                                                   [False,False,False],             # Generation not wanted, QID Generation not wanted, String Generation not wanted
+                                                                   ['',''],                         # nothing
+                                                                   answers)                         # refined user answers
 
-            if error[0] == 2:
-                # Stop if no Discipline provided by User
-                return HttpResponse(response_temp.format(err15.format(error[1])))
-
-### Integrate related mathematical Fields in MaRDI KG #############################################################################################################################################
-
-            fields, data, error = self.Entry_Generator('fie','',               # Entry of mathmatical fields (fie) with no Subproperty
-                                                       [False,False,False],    # Generation not wanted, QID Generation not wanted, String Generation not wanted
-                                                       ['',''],                # nothing
-                                                       wq,mq,data)             # data from wikidata (wq), MaRDI KG (mq) and user (data)
-
-            if error[0] == 2:
-                # Stop if no Discipline provided by User
-                return HttpResponse(response_temp.format(err26.format(error[1])))
-
+### Mathematical Fields ###########################################################################################################################################################################
+            
+                if answers['MathematicalArea'].get(0,{}).get('ID'):
+                    answers.update({'MathematicalArea':answers['MathematicalArea'][0]['ID']})
+                else:
+                    # Stop if no Mathematical Field provided by User
+                    return render(self.request,'MaRDMO/workflowError.html', {
+                        'error': 'Missing Mathematical Fields of Workflow!'
+                        }, status=200)
+            
 ### Integrate Workflow in MaRDI KG ################################################################################################################################################################
 
-            if data[dec[2][0]] == dec[2][2] and data[dec[3][0]] in (dec[3][1],dec[3][2]):
-                # If MaRDI KG integration is desired
-                workflow_qid=self.entry(self.project.title, res_obj,                                       # Name (self.project.title) and Description (res_obj) of Workflow
-                                        [(Item,Q2,P4),                                                     # instance of (P4) research workflow (Q2)
-                                         (Item,paper_qid,P3)]+                                             # cites work (P3) paper (paper_qid) provided by user
-                                        [(Item,discipline,P5) for discipline in disciplines]+              # field of work (P5) disciplines (discipline) provided by user
-                                        [(Item,field,P5) for field in fields]+                             # field of work (P5) mathematical fields (field) provided by user
-                                        [(Item,i,P6) for i in models+methods+softwares+inputs+outputs])    # uses (P6) models, methods, softwares, inputs, outputs
+                if answers['Settings']['Public'] == option['Public'] and answers['Settings']['Preview'] == option['No']: 
+                    # Facts for MaRDI KG Integration
+                    facts = [(Item,Q2,P4),(Item,paper_qid,P3) if re.match(r"Q[0-9]+",paper_qid) else (ExternalID,paper_qid,P24)] +\
+                            [(Item,discipline,P5) for discipline in disciplines] +\
+                            [(ExternalID,field,P25) for field in answers['MathematicalArea'].values()] +\
+                            [(Item, creator, P8) for creator in creator_qids] +\
+                            [(Item,i,P6) for i in methods+models+softwares+datas]        
+
+                    if answers['Settings']['WorkflowType'] == option['Computation']:
+
+                        # Add Hardware Facts for Computational Workflow
+                        facts += [(Item,i,P6,answers['Hardware'][idx]['Qualifiers']) for idx,i in enumerate(hardwares)] 
+
+                    elif answers['Settings']['WorkflowType'] == option['Analysis']:
+
+                        # Add Device Facts for Data Analysis Workflow
+                        facts += [(Item,i,P6,answers['ExperimentalDevice'][idx]['Qualifiers']) for idx,i in enumerate(devices)]
+
+                    # If MaRDI KG integration is desired
+                    if existing_workflow_qid:
+                        wbi = self.wikibase_login()
+                        item = wbi.item.get(existing_workflow_qid)
+                        for claim in item.claims.claims:
+                            item.claims.remove(claim)
+                        item.write()
+                        wbi = self.wikibase_login()
+                        item = wbi.item.get(existing_workflow_qid)       
+                        d=[]
+                        for fact in facts:
+                            if fact[1]:
+                                if fact[0] == MonolingualText:
+                                    d.append(fact[0](text=fact[1],prop_nr=fact[2]))
+                                elif fact[0] == Time:
+                                    d.append(fact[0](time=fact[1],prop_nr=fact[2]))
+                                else:
+                                    if len(fact) == 3:
+                                        d.append(fact[0](value=fact[1],prop_nr=fact[2]))
+                                    elif len(fact) == 4:
+                                        d.append(fact[0](value=fact[1],prop_nr=fact[2],qualifiers=fact[3]))
+                        item.claims.add(d)
+                        item.write()
+                        workflow_qid = item.id
+                    else:
+                        workflow_qid=self.entry(self.project.title, answers['GeneralInformation']['ResearchObjective'], facts)
+
+### Generate and Publish Workflow Page ############################################################################################################################################################
             
-### Generate Workflow Page ########################################################################################################################################################################
+                # Download Workflow Doucmentation as Markdown File
+                if answers['Settings']['Public'] == option['Local']:
+                
+                    # Load MaRDI Markdown Workflow Template
+                    path = os.path.join(os.path.dirname(__file__), 'templates', 'MaRDMO', 'workflowTemplate.md')
+                    with open(path, 'r') as file:
+                        markdown_template = file.read()
 
-            # Create Template with Tables
-            temp=self.dyn_template(data)
+                    # Create a Django Template object
+                    template = Template(markdown_template)
+                    
+                    # Render the template with the data
+                    context = Context({'title':self.project.title}|answers|option|mathmoddb)
+                    markdown_workflow = template.render(context)
+                
+                    # Provide Documentation as Markdown Download
+                    response = HttpResponse(os.linesep.join([s.strip() for s in markdown_workflow.splitlines() if s.strip()]), content_type="application/md")
+                    response['Content-Disposition'] = 'filename="workflow.md"'
+                
+                    return response
+            
+                # Preview Workflow Documentation as HTML File
+                elif answers['Settings']['Public'] == option['Public'] and answers['Settings']['Preview'] == option['Yes']:
+                    
+                    return render(self.request,'MaRDMO/workflowTemplate.html', {
+                        'title': self.project.title,
+                        'answers': answers,
+                        'option': option|mathmoddb
+                        }, status=200)
+            
+                # Export Workflow Documentation to MaRDI Portal as Mediawiki File
+                elif answers['Settings']['Public'] == option['Public'] and answers['Settings']['Preview'] == option['No']:
 
-            # Fill out MaRDI Template
-            for entry in data.items():
-                temp=re.sub('"','',re.sub(";","<br/>",re.sub("Yes: |'","",re.sub(entry[0],repr(entry[1]),temp))))
+                    # Load MaRDI Markdown Workflow Template
+                    path = os.path.join(os.path.dirname(__file__), 'templates', 'MaRDMO', 'workflowTemplate.mediawiki')
+                    with open(path, 'r') as file:
+                        mediawiki_template = file.read()
+
+                    # Create a Django Template object
+                    template = Template(mediawiki_template)
+
+                    # Render the template with the data
+                    context = Context(answers|option|mathmoddb)
+                    mediawiki_workflow = template.render(context)
+
+                    # Export to MaRDI Portal
+                    self.wikipage_export(self.project.title,os.linesep.join([re.sub(r'\$\$\s?(.*?)\$\$',r'<math>\1</math>',s.strip()) for s in mediawiki_workflow.splitlines() if s.strip()]))
+
+                    # Successful Export to Portal
+                    return render(self.request,'MaRDMO/workflowExport.html', {
+                        'WikiLink': mardi_wiki+self.project.title.replace(' ','_'),
+                        'KGLink': mardi_wiki+'Item:'+workflow_qid
+                        }, status=200)
+            
+                else:
+                    # Stop if no Export Type is chosen
+                    return render(self.request,'MaRDMO/workflowError.html', {
+                        'error': 'Missing Export Type!'
+                        }, status=200)
+
+            elif answers['Settings'].get('DocumentationType')  == option['Documentation'] or answers['Settings'].get('DocumentationType')  == option['Model']:
+            
+                # Mathematical Model documentation soon be integrated
+                answers = self.refine(answers)
+               
+                # Evaluate user-defined Model Author Name
+                if answers['Creator'].get('Name'):
+                    Surname, GivenName = answers['Creator']['Name'].split(',')
+                    answers['Creator'].update({'Surname':Surname,'GivenName':GivenName})
+                else:
+                    # Stop if no Workflow Author Name provided
+                    return render(self.request,'MaRDMO/workflowError.html', {
+                        'error': 'Missing Name of Model Documentation Creator'
+                        }, status=200)
+                
+                # Evaluate user-defined Model Author ID(s)
+                if answers['Creator'].get('IDs'):
+                    # Check if IDs provided
+                    orcidID = []; zbmathID = []
+                    for user_id in answers['Creator']['IDs'].values():
+                        user_id = user_id.split(':')
+                        if user_id[0] == 'orcid':
+                            answers['Creator'].setdefault('orcidID',[]).append(user_id[1])
+                        elif user_id[0] == 'zbmath':
+                            answers['Creator'].setdefault('zbmathID',[]).append(user_id[1])
+                        else:
+                            # Stop if wrong ID type provided for Workflow author
+                            return render(self.request,'MaRDMO/workflowError.html', {
+                                'error': 'Identifier of Model Documentation Creator not supported'
+                                }, status=200)
+                else:
+                    # Stop if no ID(s) provided
+                    return render(self.request,'MaRDMO/workflowError.html', {
+                        'error': 'Missing Identifier of Model Documentation Creator'
+                        }, status=200)
+
+        		# Query MathModDB and order Information
+                answers = ModelRetriever(answers,mathmoddb)
         
-            # Refine completed Template
-            for refine_str in refine_strs:
-                temp=re.sub(refine_str, "", temp)
+                # Download Model Doucmentation as Markdown File
+                if answers['Settings']['Public'] == option['Local']:
 
-### Publish Workflow Page #########################################################################################################################################################################
+                    # Load MaRDI Markdown Workflow Template
+                    path = os.path.join(os.path.dirname(__file__), 'templates', 'MaRDMO', 'modelTemplate.md')
+                    with open(path, 'r') as file:
+                        markdown_template = file.read()
 
-            if data[dec[2][0]] == dec[2][1]: 
-                # Download as Markdown
-                response = HttpResponse(temp, content_type="application/md")
-                response['Content-Disposition'] = 'filename="workflow.md"'
-                return response
-            
-            elif data[dec[2][0]] == dec[2][2] and data[dec[3][0]] not in (dec[3][1],dec[3][2]):
-                # Preview Markdown as HTML
-                return HttpResponse(html.format(pypandoc.convert_text(temp,'html',format='md')))
-            
-            elif data[dec[2][0]] == dec[2][2] and data[dec[3][0]] in (dec[3][1],dec[3][2]):
+                    # Create a Django Template object
+                    template = Template(markdown_template)
 
-                # Convert to Mediawiki Format
-                page = re.sub('{\|','{| class="wikitable"',pypandoc.convert_text(temp,'mediawiki',format='md'))
-               
-               # Insert Links for MaRDI, wikidata, swmath and doi entities 
-                for linker in linkers:
-                    page = re.sub(r'{0}({1})'.format(linker[0],linker[1]), r'{0}[{1}\1 \1]'.format(linker[0],linker[2]), page)
+                    # Render the template with the data
+                    context = Context({'title':self.project.title}|answers|option|mathmoddb)
+                    markdown_workflow = template.render(context)
 
-                # Export Page to MaRDI Portal
-                self.wikipage_export(self.project.title,page)
-               
-               # Successful Export to Portal
-                return HttpResponse(done.format(export.format(mardi_wiki+self.project.title.replace(' ','_'),mardi_wiki+'Item:'+workflow_qid)))
-            
+                    # Provide Documentation as Markdown Download
+                    response = HttpResponse(os.linesep.join([s.strip() for s in markdown_workflow.splitlines() if s.strip()]), content_type="application/md")
+                    response['Content-Disposition'] = 'filename="model.md"'
+
+                    return response
+
+                # Preview Model Documentation as HTML File
+                elif answers['Settings']['Public'] == option['Public'] and answers['Settings']['Preview'] == option['Yes']:
+
+                    return render(self.request,'MaRDMO/modelTemplate.html', {
+                        'title': self.project.title,
+                        'answers': answers,
+                        'option': option|mathmoddb
+                        }, status=200)
+
+                # Export Model Documentation to MathModDB as Mediawiki File
+                elif answers['Settings']['Public'] == option['Public'] and answers['Settings']['Preview'] == option['No']:
+
+                    return render(self.request,'MaRDMO/workflowError.html', {
+                        'error': 'The integration of Mathematical Models into MathModDB will be integrated soon!'
+                        }, status=200)
             else:
-                # Stop if no Export Type is chosen
-                return HttpResponse(response_temp.format(err2))
+                # Stop if no Documentation Type chosen
+                return render(self.request,'MaRDMO/workflowError.html', {
+                    'error': 'Missing Documentation Type!'
+                    }, status=200)
 
 
        ######################################################################################################
@@ -373,11 +702,8 @@ class MaRDIExport(Export):
 
 
         # If Workflow Search wanted
-        elif data[dec[0][0]] in (dec[0][3],dec[0][4]):
-
-            # Key Word and Entities to filter Workflows
-            search_objs=self.wikibase_answers(data,ws['sea'])
-
+        elif answers['Settings']['Documentation'] == option['Search']:
+            
 ### SPARQL via Research Objectives ################################################################################################################################################################
             
             # SPARQL string definitions
@@ -385,14 +711,12 @@ class MaRDIExport(Export):
             res_obj_strs = ''
 
             # If SPARQL query via research objective desired
-            if data[dec[4][0]] in (dec[4][1],dec[4][2]):
-                # Get description of workflow
+            if answers['Search'].get('Search Objective') == option['Yes']:
                 quote_str = quote_sparql
                 # Separate key words for SPARQL query vie research objective
-                res_objs=search_objs[0].split('; ')
-                if res_objs:
-                    # Define Filters for SPARQL queries
-                    for res_obj in res_objs:
+                if answers['Search'].get('Objective Keywords'):
+                    for res_obj in answers['Search']['Objective Keywords'].values():
+                        # Define Filters for SPARQL queries
                         res_obj_strs+=res_obj_sparql.format(res_obj.lower())
 
 ### SPARQL via Research Disciplines ###############################################################################################################################################################
@@ -401,37 +725,31 @@ class MaRDIExport(Export):
             res_disc_str = ''
 
             # If SPARQL query via research discipline desired
-            if data[dec[5][0]] in (dec[5][1],dec[5][2]):
+            if answers['Search'].get('Search Discipline') == option['Yes']:
                 # Separate disciplines for SPARQL query via research discipline 
-                res_discs=search_objs[1].split('; ')
-                if res_discs:
-                    for res_disc in res_discs:
-                        # Get ID of research discipline
-                        res_disc_id = res_disc.split('<|>')[0].split(':')[1]
+                if answers['Search'].get('Discipline Keywords'):
+                    for res_disc in answers['Search']['Discipline Keywords'].values():
                         # Define Filters for SPARQL queries
-                        res_disc_str += res_disc_sparql.format(P5,res_disc_id)
-            
+                        res_disc_str += res_disc_sparql.format(P5, res_disc.split('<|>')[0].split(':')[1])
+
 ### SPARQL via Mathematical Models, Methods, Softwares, Input or Output Data Sets #################################################################################################################
 
             # SPARQL string definitions
             mmsios_str = ''
 
             # If SPARQL query via Mathematical Models, Methods, Softwares, Input or Output Data Sets
-            if data[dec[6][0]] in (dec[6][1],dec[6][2]):
+            if answers['Search'].get('Search Entities') == option['Yes']:
                 # Separate Mathematical Model, Methods, Software, Input or Output Data Sets
-                mmsios=search_objs[2].split('; ')
-                if mmsios:
-                    for mmsio in mmsios:
-                        # Get ID of mathematical model, method, software, input or output data set
-                        mmsio_id = mmsio.split('<|>')[0].split(':')[1]
+                if answers['Search'].get('Entities Keywords'):
+                    for mmsio in answers['Search']['Entities Keywords'].values():
                         # Define Filters for SPARQL queries
-                        mmsios_str += mmsio_sparql.format(P6,mmsio_id)
+                        mmsios_str += mmsio_sparql.format(P6, mmsio.split('<|>')[0].split(':')[1])
 
 ### Set up Query, query MaRDI Portal and return Results ###########################################################################################################################################
 
             # Set up entire SPARQL query
             query = query_base.format(P4,Q2,res_disc_str,mmsios_str,quote_str,res_obj_strs)
-            
+
             # Query MaRDI Portal
             results = self.get_results(mardi_endpoint, query)
 
@@ -439,76 +757,20 @@ class MaRDIExport(Export):
             no_results = str(len(results))
             
             # Generate Links to Wikipage and Knowledge Graoh Entry of Results
-            links =''
+            links=[]
             for result in results:
-                links+=link.format(result["label"]["value"],mardi_wiki+result["label"]["value"].replace(' ','_'),mardi_wiki+'Item:'+result["qid"]["value"])
+                links.append([result["label"]["value"],mardi_wiki+result["label"]["value"].replace(' ','_'),mardi_wiki+'Item:'+result["qid"]["value"]])
 
-            return HttpResponse(search_done.format(no_results,links))
- 
+            return render(self.request,'MaRDMO/workflowSearch.html', {
+                    'noResults': no_results,
+                    'links': links
+                    }, status=200)
         
         else:
             # Stop if Workflow Documentation or Search not chosen
-            return HttpResponse(response_temp.format(err4))
-
-    def stringify_values(self, values):
-        '''Original function from csv export'''
-        if values is not None:
-            return '; '.join([self.stringify(value['value_and_unit']) for value in values])
-        else:
-            return ''
-
-    def stringify(self, el):
-        '''Original function from csv export'''
-        if el is None:
-            return ''
-        else:
-            return re.sub(r'\s+', ' ', str(el))
-
-    def create_table(self, column_topics, row_ids, rows):
-        '''Function that creates a markdwon table with headers.
-           Row number depends on user answers, dummy entries''' 
-        table=''
-        for row in range(rows):
-            table=table+'| '
-            for n,topic in enumerate(column_topics):
-                if row==0:
-                    table=table+topic+' | '
-                elif row==1:
-                    table=table+'-- | '
-                else:
-                    table=table+row_ids[n]+'_'+str(row-2)+' | '
-            table=table+'\n'
-        return table
-
-    def dyn_template(self, data):
-        '''Function that chooses proper raw MaRDI template and
-           inserts appropriate tables depending on user answers.'''
-        if data[dec[1][0]] in (dec[1][1],dec[1][2]):
-            # Theoretical workflow properties
-            temp=math_temp
-            tables=math_tables
-            topics=math_topics
-            ids=math_ids
-        elif data[dec[1][0]] in (dec[1][3],dec[1][4]):
-            # Experimental Workflow properties
-            temp=exp_temp
-            tables=exp_tables
-            topics=exp_topics
-            ids=exp_ids
-        else:
-            temp=[]
-            return temp
-       
-        # Set up involved discipines & fields
-        temp=re.sub('DISCIPLINES','; '.join([key for key in data.keys() if ws['dis'][0]+'_' in key]),temp)
-        temp=re.sub('FIELDS','; '.join([key for key in data.keys() if ws['fie'][0]+'_' in key]),temp)
-
-        # Set up tables through set numbers (n_max)
-        for n,table in enumerate(tables):
-            n_max=max([int(x.split('_')[-1]) if y in x else 0 for x in data.keys() for y in ids[n]])+1
-            t=self.create_table(topics[n],ids[n],n_max+2)
-            temp=re.sub(table,t,temp)
-        return(temp)
+            return render(self.request,'MaRDMO/workflowError.html', {
+                    'error': 'Missing Operation Modus!'
+                    }, status=200)
        
     def wikipage_export(self,title,content): 
         '''Genereic Mediawiki Example'''
@@ -562,42 +824,11 @@ class MaRDIExport(Export):
             "title": title,
             "token": CSRF_TOKEN,
             "format": "json",
-            "appendtext": post_content
+            "text": post_content
             }
 
         R = S.post(URL , data=PARAMS_3, files=dict(foo='bar'))
         return
-
-    def set_lengths(self, data):
-        '''Get length of the User sets'''
-        length=[]
-        sts=['Section_3/Set_1','Section_4/Set_2','Section_4/Set_3','Section_4/Set_6','Section_4/Set_7']
-        for st in sts:
-            i=0
-            data_filter = dict(filter(lambda item: st in item[0], data.items()))
-            for key in data_filter.keys():
-                if int(key.split('_')[-1])>=i:
-                    i=int(key.split('_')[-1])+1
-            length.append(i)
-        return length
-
-    def wikibase_answers(self, data, wiki, length=-1):
-        '''Takes data and extracts answers relevant for Wiki'''
-        wiki_answers=[]
-        if length >= 0:
-            for question in wiki:
-                for idx in range(length):
-                    if question+'_'+str(idx) in data:
-                        wiki_answers.append(data[question+'_'+str(idx)])
-                    else:
-                        wiki_answers.append('')
-        else:
-            for question in wiki:
-                if question in data:
-                    wiki_answers.append(data[question])
-                else:
-                    wiki_answers.append('')
-        return wiki_answers
 
     def wikibase_login(self):
         '''Login stuff for wikibase'''
@@ -612,8 +843,7 @@ class MaRDIExport(Export):
 
     def entry(self,label,description,facts):
         '''Takes arbitrary information and generates MaRDI portal entry.'''
-        wbi = self.wikibase_login()
-        
+        wbi = self.wikibase_login()  
         item = wbi.item.new()
         item.labels.set('en', label)
         item.descriptions.set('en', description)
@@ -625,8 +855,16 @@ class MaRDIExport(Export):
                     data.append(fact[0](text=fact[1],prop_nr=fact[2]))
                 elif fact[0] == Time:
                     data.append(fact[0](time=fact[1],prop_nr=fact[2]))
+                elif fact[0] == Quantity:
+                    if len(fact) == 3:
+                        data.append(fact[0](fact[1],prop_nr=fact[2]))
+                    elif len(fact) == 4:
+                        data.append(fact[0](fact[1],prop_nr=fact[2],qualifiers=fact[3]))
                 else:
-                    data.append(fact[0](value=fact[1],prop_nr=fact[2]))
+                    if len(fact) == 3:
+                        data.append(fact[0](value=fact[1],prop_nr=fact[2]))
+                    elif len(fact) == 4:
+                        data.append(fact[0](value=fact[1],prop_nr=fact[2],qualifiers=fact[3]))
         item.claims.add(data)
             
         item.write()
@@ -638,275 +876,475 @@ class MaRDIExport(Export):
         req=requests.get(endpoint_url, params = {'format': 'json', 'query': query}, headers = {'User-Agent': 'MaRDMO_0.1 (https://zib.de; reidelbach@zib.de)'}).json()
         return req["results"]["bindings"]
     
-    def portal_wikidata_check(self,mquery,wquery,data):
+    def portal_wikidata_check(self,answers,public,preview):
         '''Function checks if an entry is on MaRDI portal and returns its QID
            or on Wikidata and copies the entry to the MaRDI portal and returns
            its QID.'''
-        if wquery['qid'][0] == 'mardi':
-            qid = wquery['qid'][-1]
-            entry = [wquery['label'],wquery['quote']]
-        elif wquery['qid'][0] == 'wikidata':
-            entry = [wquery['label'],wquery['quote']]
-            if mquery['qid']['value']:
-                qid = mquery['qid']['value']
-            else:
-                #Create dummy entry and store QID if portal publication is desired
-                if data[dec[2][0]] == dec[2][2] and data[dec[3][0]] in (dec[3][1],dec[3][2]):
-                    #Create dummy entry and store QID
-                    qid = self.entry(wquery['label'],wquery['quote'],[(ExternalID,wquery['qid'][-1],P2)])
+        # Store Label and Description
+        entry = [answers.get('Name'), answers.get('Description')]
+        if answers['ID']:
+            # IF ID exists, split in prefix and qnumber
+            prefix, qnumber = answers['ID'].split(':')
+            if prefix == 'mardi':
+                # Store MaRDI QID
+                qid = qnumber
+            elif prefix == 'wikidata':
+                # IF Wikidata QID, check Publication Type
+                if public == option['Public'] and preview == option['No']:
+                    #Create Entry on MaRDI Portal and store MaRDI QID
+                    qid = self.entry(entry[0], entry[1] , [(ExternalID, qnumber, P2)])
                 else:
                     qid = 'tbd'
-        elif mquery['qid']['value']:
-            entry = [wquery['label'],wquery['quote']]
-            qid = mquery['qid']['value']
+            else:
+                qid = None
         else:
-            #QID not existing
-            qid = None
-            entry = None
+            qid = answers['ID']
 
         return qid, entry
-        
-    def paper_prop_entry(self,wquery,mquery,props):
-        '''This function takes (a property of) a paper and creates the corresponding wikibase entries.'''
-        if mquery["qid"]["value"]:
-            #If on Portal store QID
-            qid=mquery["qid"]["value"]
-        else:
-            #If not on Portal, check if on Wikidata
-            if wquery["qid"]["value"]:
-                if mquery["qid2"]["value"]:
-                    #If on Portal, store QID.
-                    qid=mquery["qid2"]["value"]
-                else:
-                    #If only on wikidata, generate dummy entry, store QID.
-                    qid=self.entry(wquery["label"]["value"],wquery["quote"]["value"],[(ExternalID,wquery["qid"]["value"],P2)])
-            else:
-                #If not on Portal / Wikidata create entry
-                if mquery["qid3"]["value"]:
-                    #If on Portal, store QID.
-                    qid=mquery["qid3"]["value"]
-                else:
-                    #Create entry, store QID.
-                    qid=self.entry(props[0],props[1],props[2])
-        return qid
 
-    def sparql(self,data,ws,orcid=None,doi=None,cit=None):
-        '''This function takes user answers and performs SPARQL queries to Wikidata and MaRDI portal.'''
-        
-        length = self.set_lengths(data)
-
-        types = ['model', 'method', 'software', 'inputs', 'outputs', 'disciplines','fields']
-        strings = ['mod', 'met', 'sof', 'inp', 'out', 'dis','fie']
-        strings2 = ['moms','mems','pl']
-
-        user_answers ={}
-        wq = {} ; qw = {}
-        mq = {} ; qm = {}
-
-        ### Gather all User Answers relevant for MaRDI KG
-
-        for IDX, (TYPE, ABBR) in enumerate(zip(types, strings)): 
-            # x[0] all user answers for model, methods, software, inputs, outputs and disciplines
-            # x[1] number of models, methods, softwares, inputs, outputs and disciplines
-            # x[2] qid, name and description of model, methods, softwares, inputs, outputs and disciplines
-            # x[3] qid, name, description of main subject of model and methods and programming languages of softwares
-            # x[4] qid, name, description, main subject / programming language, formula, external id of model, methods, softwares, inputs, outputs and disciplines
-            # x[5] number of main subjects of model and methods or programming languages of softwares
-
-            x = []
-
-            x.append(self.wikibase_answers(data, ws[ABBR], length[IDX]) if ABBR not in ('dis','fie') else self.wikibase_answers(data, ws[ABBR])[0].split('; '))
-
-            x.append(length[IDX] if ABBR not in ('dis','fie') else len(x[0]) if x else 0)
-
-            x.append([re.split(' <\|> ', x[0][i]) if x[0][i] else 
-                     ['', x[0][x[1] + i] if ABBR in strings[:5] else '',
-                      x[0][x[1] * 2 + i] if ABBR in strings[:3] else 'data set' if ABBR in strings[3:5] else ''] for i in range(x[1])])
-
-            # For existing software get programming languages from KGs (might be extended for further information)
-            if ABBR in ('sof'):
-                for i in range(x[1]):
-                    res = self.get_pl(x[2][i][0])
-                    if res:
-                        x[0][3*x[1]+i] = res
-            
-            x.append([[re.split(' <\|> ', X) if X  else ['', '', '']
-                      for X in x[0][i].split('; ')] for i in range(x[1] * 3, x[1] * 4)] if ABBR in strings[:3] else [])
-             
-            x.append([[x[2][i][j] for j in range(3)] + [x[3][i] if ABBR in strings[:3] else '',
-                      x[0][x[1] * 4 + i] if ABBR in strings[:2] else '',
-                      x[0][len(x[0]) - x[1] + i] if ABBR in strings[:5] else ''] for i in range(x[1])])
-            
-            x.append([len(s) if x and s[0][0] else 0 for s in x[3]] if ABBR in strings[:3] else 0)
-
-            user_answers.update({TYPE: x})
-        
-        ### Number of Methods, Software, Inputs, Outputs, Disciplines entered by User
-       
-        wq.update({'no' : {s : user_answers[d][1] for s,d in zip(strings,types)}})
-        
-        ### Number of Main Subjects and Programming Languages entered by User
-       
-        for s,d in zip(strings2,types[:3]):
-            wq.update({s+str(i) : {'no' : j} for i,j in enumerate(user_answers[d][5])})
-        
-        ### Wikidata Infos (wq) and MaRDI KG SPARQL Queries (mq) for Model, Method, Software, Input, Output, Discipline
-       
-        for s,d in zip(strings,types):
-
-            wq.update({'wq'+s+str(i): {'qid':m[0].split(':'), 'label':m[1], 'quote':m[2], 'form':m[4], 'id':m[5]} for i,m in enumerate(user_answers[d][4])})
-            
-            qm.update({'mq'+s+str(i) : mini.format('?qid',mbody.format(wq['wq'+s+str(i)]['label'].replace("'",r"\'"),
-                                                                       wq['wq'+s+str(i)]["quote"].replace("'",r"\'")),'1')
-                                                                       for i in range(user_answers[d][1])})
-
-            if s in strings[:3]:
-
-                wq.update({'wq'+s+'_sub'+str(i)+'_'+str(j): {'qid': f[0].split(':'), 'label':f[1], 'quote':f[2]} for i,ss in enumerate(user_answers[d][4]) for j,f in enumerate(ss[3])})
-
-                qm.update({'mq'+s+'_sub'+str(i)+'_'+str(j) : mini.format('?qid',mbody.format(wq['wq'+s+'_sub'+str(i)+'_'+str(j)]['label'].replace("'",r"\'"),
-                                                                                             wq['wq'+s+'_sub'+str(i)+'_'+str(j)]['quote'].replace("'",r"\'")),'1')
-                                                                                             for i,ss in enumerate(user_answers[d][4]) for j,_ in enumerate(ss[3])})
-        
-        ### Request Data from MaRDI KG
-
-        for key in qm.keys():
-            mq.update({key:{**dict.fromkeys({'qid'},{'value':''}),**self.get_results(mardi_endpoint,qm[key])[0]}})
-        
-        ### Additional Queries if Publication is provided
-
-        if cit:
-            
-            #Generate Keys for Publication queries
-
-            keys = dict(Keys)
-            key_dat=[orcid]
-            key_ind=['pub']
-
-            for inds in zip(key_dat,key_ind):
-                for i,_ in enumerate(inds[0]):
-                    if type(keys_flex['wq'+inds[1]]) == str:
-                        keys['wq'+inds[1]]+=keys_flex['wq'+inds[1]].format(i)
-                        keys['mq'+inds[1]]+=keys_flex['mq'+inds[1]].format(i)
+    def Entry_Generator_Paper_Supplements(self, props, relations, add_relations):
+        '''This function takes a paper supplement (i.e. authors, languages, journal) and creates the corresponding wikibase entries.'''
+        qids = []
+        for prop in props.values():
+            if prop and prop != 'NONE':
+                prop = prop.split(' <|> ')
+                if re.match(r"mardi:Q[0-9]+", prop[0]):
+                    # If supplement  on MaRDI Portal store QID
+                    qids.append(prop[0].split(':')[1])
+                elif re.match(r"wikidata:Q[0-9]+", prop[0]):
+                    # If supplement on Wikidata check if similar entity exist in MarDI KG and use or create dummy Wikidata entry
+                    req = {}
+                    try:
+                        req = requests.get(mardi_api+'?action=wbsearchentities&format=json&language=en&type=item&limit=10&search={0}'.format(prop[1]),
+                                           headers = {'User-Agent': 'MaRDMO_0.1 (https://zib.de; reidelbach@zib.de)'}
+                                          ).json()['search'][0]
+                    except (KeyError,IndexError):
+                        # KeyError: search string is empty
+                        # IndexError: no result found for string
+                        pass
+                    if req:
+                        #If supplement with Wikidata Label Description on MaRDI Portal, store QID
+                        if req['display']['label']['value'] == prop[1] and req['display']['description']['value'] == prop[2]:
+                            qids.append(req['id'])
+                        else:
+                            qids.append(self.entry(prop[1], prop[2], [(ExternalID, prop[0].split(':')[1], P2)]))
                     else:
-                        keys['wq'+inds[1]]+=keys_flex['wq'+inds[1]][0].format(i)
-                        keys['mq'+inds[1]]+=keys_flex['mq'+inds[1]][0].format(i)
-
-            #Set up SPRQL query and request data from wikidata
-
-            qw.update({'wqpub' : wini.format(keys['wqpub'],wbpub.format(doi[-1].upper(),cit['journal'].lower(),lang_dict[cit['language']],
-                                    cit['language'],cit['title'],''.join([''.join(wbaut.format(i,aut[1])) for i,aut in enumerate(orcid)])),'1')})
-            
-            wq.update({'wqpub':{**dict.fromkeys(keys['wqpub'].split(' ?'),{"value":''}),**self.get_results(wikidata_endpoint,qw['wqpub'])[0]}})
-
-            #Set up SPARQL query and request data from MaRDI KG
-            
-            qm.update({'mqpub' : mini.format(keys['mqpub'],mbpub.format(doi[-1].upper(),wq['wqpub']["label_doi"]["value"],wq['wqpub']["quote_doi"]["value"],cit['journal'].lower(),
-                                    wq['wqpub']["label_jou"]["value"],wq['wqpub']["quote_jou"]["value"],lang_dict[cit['language']],cit['language'],
-                                    wq['wqpub']["label_lan"]["value"],wq['wqpub']["quote_lan"]["value"],cit['title'],''.join([''.join(mbaut.format(i,aut[1],
-                                    wq['wqpub']['label_'+str(i)]['value'],wq['wqpub']['quote_'+str(i)]['value'],aut[0])) for i,aut in enumerate(orcid)])),'1')})
-            
-            mq.update({'mqpub':{**dict.fromkeys(keys['mqpub'].split(' ?'),{"value":''}),**self.get_results(mardi_endpoint,qm['mqpub'])[0]}})
-            
-            #Separate author, language and journal data requested from Wikidata and MaRDI KG
-            
-            EXT=(['aut','_',orcid],
-                 ['lan','_lan'],
-                 ['jou','_jou'])
-
-            for ext in EXT:
-                if len(ext) == 2:
-                    wq.update({'wq'+ext[0]:{key.split('_')[0]: value for (key, value) in wq['wqpub'].items() if ext[1] in key}})
-                    mq.update({'mq'+ext[0]:{key.split('_')[0]: value for (key, value) in mq['mqpub'].items() if ext[1] in key}})
+                        qids.append(self.entry(prop[1], prop[2], [(ExternalID, prop[0].split(':')[1], P2)]))
                 else:
-                    for i,_ in enumerate(ext[2]):
-                        wq.update({'wq'+ext[0]+str(i):{key.split('_')[0]: value for (key, value) in wq['wqpub'].items() if ext[1]+str(i) in key}})
-                        mq.update({'mq'+ext[0]+str(i):{key.split('_')[0]: value for (key, value) in mq['mqpub'].items() if ext[1]+str(i) in key}})
+                    # If supplement not on MaRDI KG or Wikidata check if Entity with standard label and description exists and use it or create it
+                    req = {}
+                    try:
+                        req = requests.get(mardi_api+'?action=wbsearchentities&format=json&language=en&type=item&limit=10&search={0}'.format(prop[1]),
+                                           headers = {'User-Agent': 'MaRDMO_0.1 (https://zib.de; reidelbach@zib.de)'}
+                                          ).json()['search'][0]
+                    except (KeyError,IndexError):
+                        # KeyError: search string is empty
+                        # IndexError: no result found for string
+                        pass
+                    if add_relations:
+                        # For Authors additional relations are required
+                        relations += [(ExternalID, p.split(':')[1], P22 if p.split(':')[0] == 'orcid' else P23 if p.split(':')[0] == 'zbmath' else '') for p in prop[0].split('; ')] 
+                    if req:
+                        #If supplement with Wikidata Label Description on MaRDI Portal, store QID
+                        if req['display']['label']['value'] == prop[1] and req['display']['description']['value'] == prop[2]:
+                            qids.append(req['id'])
+                        else:
+                            qids.append(self.entry(prop[1], prop[2], relations))
+                    else:
+                        qids.append(self.entry(prop[1], prop[2], relations))
+        return qids
 
-        return wq, mq
+    def refine(self,answers):
+        '''This function takes user answers and performs SPARQL queries to MaRDI portal.'''
+        
+        entities = ['NonMathematicalDiscipline','Models','Software','DataSet','Method','Hardware','ExperimentalDevice','ResearchField',
+                    'ResearchProblem','AdditionalModel','MathematicalFormulation','Quantity','Task','PublicationModel']
 
-    def Entry_Generator(self,Type,Sub_Type,Generate,Relations,wq,mq,data):
+        for entity in entities:
+            for key in answers[entity]:
+                # Refining IDs, Names and Descriptions of entities
+                if answers[entity][key].get('ID') and answers[entity][key].get('ID') != 'not in MathModDB':
+                    if type(answers[entity][key]['ID']) == str:
+                        ID, Name, Description = answers[entity][key]['ID'].split(' <|> ')
+                        if re.match(r"mardi:Q[0-9]+", ID): 
+                            answers[entity][key].update({'ID':ID, 'Name':Name, 'Description':Description})
+                        else:
+                            mardiID = self.find_item(Name,Description)
+                            if mardiID:
+                                answers[entity][key].update({'ID':f"mardi:{mardiID}", 'Name':Name, 'Description':Description})
+                            else:
+                                answers[entity][key].update({'ID':ID, 'Name':Name, 'Description':Description})
+                    else:
+                        for ikey in answers[entity][key]['ID']:
+                            ID, Name, Description = answers[entity][key]['ID'][ikey].split(' <|> ')
+                            if re.match(r"mardi:Q[0-9]+", ID):
+                                answers[entity][key]['ID'].update({ikey:{'ID':ID, 'Name':Name, 'Description':Description}})
+                            else:
+                                mardiID = self.find_item(Name,Description)
+                                if mardiID:
+                                    answers[entity][key]['ID'].update({ikey:{'ID':f"mardi:{mardiID}", 'Name':Name, 'Description':Description}})
+                                else:
+                                    answers[entity][key]['ID'].update({ikey:{'ID':ID, 'Name':Name, 'Description':Description}})
+                else:
+                    if answers[entity][key].get('Name') and answers[entity][key].get('Description'):
+                        mardiID = self.find_item(answers[entity][key]['Name'],answers[entity][key]['Description'])
+                        if mardiID:
+                            answers[entity][key].update({'ID':f"mardi:{mardiID}"})
+                        else:
+                            answers[entity][key].update({'ID':None})
+                    else:
+                        answers[entity][key].update({'ID':None})
+                # Refining Subproperties of entities
+                if answers[entity][key].get('SubProperty'):
+                    for ikey in answers[entity][key]['SubProperty']:
+                        ID, Name, Description = answers[entity][key]['SubProperty'][ikey].split(' <|> ')
+                        if re.match(r"mardi:Q[0-9]+", ID):
+                            answers[entity][key]['SubProperty'].update({ikey:{'ID':ID, 'Name':Name, 'Description':Description}})
+                        else:
+                            mardiID = self.find_item(Name,Description)
+                            if mardiID:
+                                answers[entity][key]['SubProperty'].update({ikey:{'ID':f"mardi:{mardiID}", 'Name':Name, 'Description':Description}})
+                            else:
+                                answers[entity][key]['SubProperty'].update({ikey:{'ID':ID, 'Name':Name, 'Description':Description}})
+                if answers[entity][key].get('SubProperty2'):
+                    for ikey in answers[entity][key]['SubProperty2']:
+                        ID, Name, Description = answers[entity][key]['SubProperty2'][ikey].split(' <|> ')
+                        if re.match(r"mardi:Q[0-9]+", ID):
+                            answers[entity][key]['SubProperty2'].update({ikey:{'ID':ID, 'Name':Name, 'Description':Description}})
+                        else:
+                            mardiID = self.find_item(Name,Description)
+                            if mardiID:
+                                answers[entity][key]['SubProperty2'].update({ikey:{'ID':f"mardi:{mardiID}", 'Name':Name, 'Description':Description}})
+                            else:
+                                answers[entity][key]['SubProperty2'].update({ikey:{'ID':ID, 'Name':Name, 'Description':Description}})
+                if answers[entity][key].get('MathModID'):
+                    if type(answers[entity][key]['MathModID']) == str:
+                        if answers[entity][key]['MathModID'] != 'not in MathModDB':
+                            ID, Name = answers[entity][key]['MathModID'].split(' <|> ')
+                            answers[entity][key].update({'MathModID':ID,'Name':Name})
+                    else:
+                        for ikey in answers[entity][key]['MathModID']:
+                            ID, Name = answers[entity][key]['MathModID'][ikey].split(' <|> ')
+                            answers[entity].setdefault('MathModID',{}).update({ikey:{'MathModID':ID, 'Name':Name}})
+        return answers
+
+    def Entry_Generator(self,Type,Generate,Relations,answers):
         '''Function queries Wikidata/MaRDI KG, uses and generates entries in MaRDI Knowledge Graph.'''
-    
-        try:
-            del data[ws[Type][0]]
-        except:
-            pass
-    
+        
         qids=[]
-        for i in range(wq['no'][Type]):
-            
-            # Hyperlinks for Software (extendable to others)
-            if Type == 'sof':
-                for vdp in VDP:
-                    if vdp+'_'+str(i) in data.keys():
-                        data.update({vdp+'_'+str(i):re.sub(r'Yes: (\S+)',r'[Yes](\1)',data[vdp+'_'+str(i)])})
-
+        for key in answers[Type].keys():
             # Check if on Portal or in Wikidata, integrate Wikidata entry if desired
-            qid,entry=self.portal_wikidata_check(mq['mq'+Type+str(i)],wq['wq'+Type+str(i)],data)
-
+            qid, entry = self.portal_wikidata_check(answers[Type][key], answers['Settings']['Public'], answers['Settings']['Preview'])        
             # Update User answers
-            if entry and qid:
+            if qid: 
                 qids.append(qid)
-                if Type in ('dis','fie'):
-                    data.update({ws[Type][0]+'_'+str(i):'{0} - [{1}]({2}Item:{3})'.format(str(i+1),entry[0],mardi_wiki,qid)})
-                else:
-                    data.update({ws[Type][0]+'_'+str(i):'mardi:'+qid,ws[Type][1]+'_'+str(i):entry[0],ws[Type][2]+'_'+str(i):entry[1]})
-    
+                answers[Type][key].update({'mardiId': qid, 'uri': f"{mardi_wiki}Item:{qid}"})
+            
             if Generate[0]:
                 # Stop if no label and quote is provided for entry to generate
-                if not (qid or wq['wq'+Type+str(i)]['label'] and wq['wq'+Type+str(i)]['quote']):
-                    return qids, data, [0,i]
+                if not (qid or entry[0] and entry[1]):
+                    return qids, answers, [0,key]
     
                 # Get subproperty of 'new' entity
-                sub_qids=[]
-                sub_qid_str=''
-    
+                subqids = []
+                subqids2 = []
+ 
                 if Generate[1]:
-                    for j in range(wq[Sub_Type+str(i)]['no']):
-                        # Check if subproperty on Portal or in Wikidata (store QID and string)
-                        if wq['wq'+Type+'_sub'+str(i)+'_'+str(j)]['qid'][0]:
-                            sub_qid,entry=self.portal_wikidata_check(mq['mq'+Type+'_sub'+str(i)+'_'+str(j)],wq['wq'+Type+'_sub'+str(i)+'_'+str(j)],data)
-                            sub_qids.append(sub_qid)
-                            sub_qid_str+='[{0}]({1}Item:{2});'.format(entry[0],mardi_wiki,sub_qid)
-                     
-                    # Stop if entry has no QID and its subproperty has no QID    
-                    if not (qid or sub_qids):
-                        return qids, data, [1,i]
-    
-                    if Generate[2]:
-                        # Update User answers
-                        data.update({ws[Type][3]+'_'+str(i):sub_qid_str})
+                    
+                    # Define Qualifier for Entries
+                    answers[Type][key].update({'Qualifiers':Qualifiers()})
+
+                    if Type == 'ExperimentalDevice' and answers['Settings']['WorkflowType'] == option['Analysis']:
+
+                        if answers['Settings']['Public'] == option['Public'] and answers['Settings']['Preview'] == option['No']:
+                            # Add Version as qualifier of 'uses' statement
+                            if answers[Type][key].get('Version'):
+                                answers[Type][key]['Qualifiers'].add(String(prop_nr=Relations[3], value=answers[Type][key].get('Version')))
+                            # Add Serial Number as qualifier of 'uses' statement
+                            if answers[Type][key].get('SerialNumber'):
+                                answers[Type][key]['Qualifiers'].add(String(prop_nr=Relations[4], value=answers[Type][key].get('SerialNumber')))
+                        
+                        # Search and add Location as qualifier of 'uses' statement 
+                        for subkey in answers[Type][key].get('SubProperty', {}).keys():
+                            if answers[Type][key]['SubProperty'][subkey]: 
+                                location, _ = self.portal_wikidata_check(answers[Type][key]['SubProperty'][subkey], answers['Settings']['Public'], answers['Settings']['Preview'])
+                                answers[Type][key]['SubProperty'][subkey].update({'mardiId': location, 'uri': f"{mardi_wiki}Item:{location}"})
+                                if answers['Settings']['Public'] == option['Public'] and answers['Settings']['Preview'] == option['No']:
+                                    answers[Type][key]['Qualifiers'].add(Item(prop_nr=Relations[1], value=location))
+                        
+                        # Search and add available Software as qualifier of 'uses' statement
+                        for subkey in answers[Type][key].get('SubProperty2', {}).keys():
+                            if answers[Type][key]['SubProperty2'][subkey]:
+                                availSoftware, _ = self.portal_wikidata_check(answers[Type][key]['SubProperty2'][subkey], answers['Settings']['Public'], answers['Settings']['Preview'])
+                                answers[Type][key]['SubProperty2'][subkey].update({'mardiId': availSoftware, 'uri': f"{mardi_wiki}Item:{availSoftware}"})
+                                if answers['Settings']['Public'] == option['Public'] and answers['Settings']['Preview'] == option['No']:
+                                    answers[Type][key]['Qualifiers'].add(Item(prop_nr=Relations[2], value=availSoftware))
+                    
+                    elif Type == 'Hardware' and answers['Settings']['WorkflowType'] == option['Computation']:
+                        
+                        # Search and add CPU, with number of cores and ID (wikidata / wikichip)
+                        cpuIDs=[]
+                        for subkey in answers[Type][key].get('SubProperty', {}).keys():
+                            cpuID = self.find_item(answers[Type][key]['SubProperty'][subkey]['Name'],answers[Type][key]['SubProperty'][subkey]['Description'])
+                            if not cpuID:
+                                if answers['Settings']['Public'] == option['Public'] and answers['Settings']['Preview'] == option['No']:
+                                    cpuID = self.entry(
+                                                answers[Type][key]['SubProperty'][subkey]['Name'],answers[Type][key]['SubProperty'][subkey]['Description'],
+                                                [(Item,Relations[0],Relations[3]),(Quantity,answers['Hardware'][key].get('Core') if answers['Hardware'][key].get('Core') else '1',Relations[4])]+
+                                                [(ExternalID,answers[Type][key]['SubProperty'][subkey]['ID'].split(':')[-1],Relations[5] if 'wikidata' in answers[Type][key]['SubProperty'][subkey]['ID'] else Relations[6])]
+                                                )
+                                else:
+                                    cpuID = 'tbd'
+                            answers[Type][key]['SubProperty'][subkey].update({'mardiId': cpuID, 'uri': f"{mardi_wiki}Item:{cpuID}"})
+                            cpuIDs.append(cpuID)
+
+                        # Search and add Compilers as qualifiers of 'uses' statement
+                        for subkey in answers[Type][key].get('SubProperty2', {}).keys():
+                            if answers[Type][key]['SubProperty2'][subkey]:
+                                compiler, _ = self.portal_wikidata_check(answers[Type][key]['SubProperty2'][subkey], answers['Settings']['Public'], answers['Settings']['Preview'])
+                                answers[Type][key]['SubProperty2'][subkey].update({'mardiId': compiler, 'uri': f"{mardi_wiki}Item:{compiler}"})
+                                if answers['Settings']['Public'] == option['Public'] and answers['Settings']['Preview'] == option['No']:
+                                    answers[Type][key]['Qualifiers'].add(Item(prop_nr=Relations[2], value=compiler))
+
+                    else:
+                        for subkey in answers[Type][key].get('SubProperty', {}).keys():
+                            # Check if subproperty on Portal or in Wikidata (store QID and string)
+                            if answers[Type][key]['SubProperty'][subkey]: 
+                                subqid, subentry = self.portal_wikidata_check(answers[Type][key]['SubProperty'][subkey], answers['Settings']['Public'], answers['Settings']['Preview'])
+                                answers[Type][key]['SubProperty'][subkey].update({'mardiId': subqid, 'uri': f"{mardi_wiki}Item:{subqid}"})
+                                subqids.append(subqid)
+                                if answers['Settings']['Public'] == option['Public'] and answers['Settings']['Preview'] == option['No']:
+                                     answers[Type][key]['Qualifiers'].add(Item(prop_nr=Relations[1], value=subqid))
+
+                        for subkey in answers[Type][key].get('SubProperty2', {}).keys():
+                            # Check if subproperty2 on Portal or in Wikidata (store QID and string)
+                            if answers[Type][key]['SubProperty2'][subkey]:
+                                subqid2, subentry = self.portal_wikidata_check(answers[Type][key]['SubProperty2'][subkey], answers['Settings']['Public'], answers['Settings']['Preview'])
+                                answers[Type][key]['SubProperty2'][subkey].update({'mardiId': subqid2, 'uri': f"{mardi_wiki}Item:{subqid2}"})
+                                subqids2.append(subqid2)
+
+                        # Stop if entry has no QID and its subproperty has no QID    
+                        if not (qid or subqids):
+                            return qids, answers, [1,key]
     
                 # Generate Entry QID
                 if not qid:
                     # If desired generate Entry in MaRDI KG and update User answers
-                    if data[dec[2][0]] == dec[2][2] and data[dec[3][0]] in (dec[3][1],dec[3][2]):
-                        qids.append(self.entry(wq['wq'+Type+str(i)]['label'],wq['wq'+Type+str(i)]['quote'], 
-                                               [(Item,Relations[0],P4)]+
-                                               [(Item,sub_qid,Relations[1]) for sub_qid in sub_qids]+
-                                               [(String,re.sub("\$","",form.lstrip()),P18) for form in re.split(';',wq['wq'+Type+str(i)]['form'])]+
-                                               [(ExternalID,wq['wq'+Type+str(i)]['id'].split(':')[-1] if wq['wq'+Type+str(i)]['id'].split(':')[-1] else '',
-                                                   P16 if wq['wq'+Type+str(i)]['id'].split(':')[0] == 'doi' else P20)]))
-                        data.update({ws[Type][0]+'_'+str(i):'mardi:'+qids[-1]})
+                    if answers['Settings']['Public'] == option['Public'] and answers['Settings']['Preview'] == option['No']:
+                        if Type == 'Hardware':
+                            qids.append(self.entry(
+                                entry[0],entry[1],
+                                [(Item,Relations[0],Relations[3])] +
+                                [(Item,cpuID,Relations[1],Qualifiers().add(Quantity(answers['Hardware'][key].get('Node') if answers['Hardware'][key].get('Node') else '1',prop_nr=Relations[7]))) for cpuID in cpuIDs]))
+                        elif Type == 'ExperimentalDevice':
+                            qids.append(self.entry(
+                                entry[0],entry[1],
+                                [(Item,Relations[0],P4)]))
+                        else:
+                            qids.append(self.entry(entry[0],entry[1], 
+                                                   [(Item,Relations[0],P4)]+
+                                                   [(ExternalID,answers[Type][key].get('MathModID','') if answers[Type][key].get('MathModID','') != 'not in MathModDB' else '',P24)]+
+                                                   [(Item,subqid,Relations[1]) for subqid in subqids]+
+                                                   [(Item,subqid2,Relations[2]) for subqid2 in subqids2]+ 
+                                                   [(String,re.sub("\$","",form.lstrip()),P18) for form in answers[Type][key].get('Formular',{}).values()]+
+                                                   [(ExternalID,answers[Type][key].get('Reference','').split(':')[-1],
+                                                     P16 if answers[Type][key].get('Reference','').split(':')[0] == 'doi' else P20 if answers[Type][key].get('Reference','').split(':')[0] == 'sw' else P24 if answers[Type][key].get('Reference','').split(':')[0] == 'url' else '')]))
+                        answers[Type][key].update({'mardiId': qids[-1], 'uri': f"{mardi_wiki}Item:{qids[-1]}"})
                     else:
-                        data.update({ws[Type][0]+'_'+str(i):'mardi:tbd'})
+                        answers[Type][key].update({'mardiId': 'tbd', 'uri': f"{mardi_wiki}Item:{qid}"})
             else:
                 if not qid:
-                    return qids, data, [2,i]
+                    return qids, answers, [2,key]
 
-        return qids, data, [-1,-1]
-
-    def get_pl(self,soft_id):
-        '''Frunction gets programming language information from KGs if User selects existing software'''
-        R=''
-        if soft_id.split(':')[0] == 'wikidata':
-            res = self.get_results(wikidata_endpoint,wini.format(pl_vars,pl_query.format(soft_id.split(':')[-1],'P277'),'100'))
-            R=('; ').join(['wikidata:'+r['qid']['value']+' <|> '+r['label']['value']+' <|> '+r['quote']['value'] if ('qid' and 'label' and 'quote') in r.keys() else '' for r in res])
-        elif soft_id.split(':')[0] == 'mardi':
-            res = self.get_results(mardi_endpoint,mini.format(pl_vars,pl_query.format(soft_id.split(':')[-1],P19),'100'))
-            R=('; ').join(['mardi:'+r['qid']['value']+' <|> '+r['label']['value']+' <|> '+r['quote']['value'] if ('qid' and 'label' and 'quote') in r.keys() else '' for r in res])
-        return R
-
+        return qids, answers, [-1,-1]
             
+    def find_item(self, label, description, api=mardi_api, language="en"):
+        # Perform label-based search
+        response = requests.get(api, params={
+            'action': 'wbsearchentities',
+            'format': 'json',
+            'language': 'en',
+            'type': 'item',
+            'limit': 10,
+            'search': label
+        }, headers={'User-Agent': 'MaRDMO_0.1 (https://zib.de; reidelbach@zib.de)'})
+        data = response.json()
+        # Filter results based on description
+        matched_items = [item for item in data['search'] if item.get('description') == description] 
+        if matched_items:
+            # Return the ID of the first matching item
+            return matched_items[0]['id']
+        else:
+            # No matching item found
+            return None
+
+    def get_answer(self, val, uName, dName, Id, set_prefix=False, set_index=False, collection_index=False, option_text=False, external_id=False):
+        '''Function that retrieves individual User answers'''
+        val.setdefault(uName, {})
+        try:
+            values = self.project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=Id))
+        except:
+            values = []
+        for value in values:
+            if value.option:
+                if option_text:
+                    if set_prefix:
+                        if set_index:
+                            if collection_index:
+                                if external_id:
+                                    val[uName].setdefault(int(value.set_prefix), {}).setdefault(value.set_index, {}).setdefault(dName, {}).update({value.collection_index:[value.option_uri, value.external_id]})
+                                else:
+                                    val[uName].setdefault(int(value.set_prefix), {}).setdefault(value.set_index, {}).setdefault(dName, {}).update({value.collection_index:[value.option_uri, value.text]})
+                            else:
+                                if external_id:
+                                    val[uName].setdefault(int(value.set_prefix), {}).setdefault(value.set_index, {}).update({dName:[value.option_uri, value.external_id]})
+                                else:
+                                    val[uName].setdefault(int(value.set_prefix), {}).setdefault(value.set_index, {}).update({dName:[value.option_uri, value.text]})
+                        else:
+                            if collection_index:
+                                if external_id:
+                                    val[uName].setdefault(int(value.set_prefix), {}).setdefault(dName, {}).update({value.collection_index:[value.option_uri, value.external_id]})
+                                else:
+                                    val[uName].setdefault(int(value.set_prefix), {}).setdefault(dName, {}).update({value.collection_index:[value.option_uri, value.text]})
+                            else:
+                                if external_id:
+                                    val[uName].setdefault(int(value.set_prefix), {}).update({dName:[value.option_uri, value.external_id]})
+                                else:
+                                    val[uName].setdefault(int(value.set_prefix), {}).update({dName:[value.option_uri, value.text]})
+                    else:
+                        if set_index:
+                            if collection_index:
+                                if external_id:
+                                    val[uName].setdefault(value.set_index, {}).setdefault(dName, {}).update({value.collection_index:[value.option_uri, value.external_id]})
+                                else:
+                                    val[uName].setdefault(value.set_index, {}).setdefault(dName, {}).update({value.collection_index:[value.option_uri, value.text]})
+                            else:
+                                if external_id:
+                                    val[uName].setdefault(value.set_index, {}).update({dName:[value.option_uri, value.external_id]})
+                                else:
+                                    val[uName].setdefault(value.set_index, {}).update({dName:[value.option_uri, value.text]})
+                        else:
+                            if collection_index:
+                                if external_id:
+                                    val[uName].setdefault(dName, {}).update({value.collection_index:[value.option_uri, value.external_id]})
+                                else:
+                                    val[uName].setdefault(dName, {}).update({value.collection_index:[value.option_uri, value.text]})
+                            else:
+                                if external_id:
+                                    val[uName].update({dName:[value.option_uri, value.external_id]})
+                                else:
+                                    val[uName].update({dName:[value.option_uri, value.text]})
+                else:
+                    if set_prefix:
+                        if set_index:
+                            if collection_index:
+                                if len(value.set_prefix.split('|')) == 1:
+                                    val[uName].setdefault(int(value.set_prefix), {}).setdefault(value.set_index, {}).setdefault(dName, {}).update({value.collection_index:value.option_uri})
+                                elif len(value.set_prefix.split('|')) == 2:
+                                    prefix = value.set_prefix.split('|')
+                                    val[uName].setdefault(int(prefix[0]), {}).setdefault(value.set_index, {}).setdefault(dName, {}).update({value.collection_index:value.option_uri})
+                            else:
+                                if len(value.set_prefix.split('|')) == 1:
+                                    val[uName].setdefault(int(value.set_prefix), {}).setdefault(dName, {}).update({value.set_index:value.option_uri})
+                                elif len(value.set_prefix.split('|')) == 2:
+                                    prefix = value.set_prefix.split('|')
+                                    val[uName].setdefault(int(prefix[0]), {}).setdefault(dName, {}).update({value.set_index:value.option_uri})
+                        else:
+                            if collection_index:
+                                val[uName].setdefault(int(value.set_prefix), {}).setdefault(dName, {}).update({value.collection_index:value.option_uri})
+                            else:
+                                val[uName].setdefault(int(value.set_prefix), {}).update({dName:value.option_uri})
+                    else:
+                        if set_index:
+                            if collection_index:
+                                val[uName].setdefault(value.set_index, {}).setdefault(dName, {}).update({value.collection_index:value.option_uri})
+                            else:
+                                val[uName].setdefault(value.set_index, {}).update({dName:value.option_uri})
+                        else:
+                            if collection_index:
+                                val[uName].setdefault(dName, {}).update({value.collection_index:value.option_uri})
+                            else:
+                                val[uName].update({dName:value.option_uri})
+            elif value.text and value.text != 'NONE':
+                if set_prefix:
+                    if set_index:
+                        if collection_index:
+                            if external_id:
+                                val[uName].setdefault(int(value.set_prefix), {}).setdefault(value.set_index, {}).setdefault(dName, {}).update({value.collection_index:value.external_id})
+                            else:
+                                val[uName].setdefault(int(value.set_prefix), {}).setdefault(value.set_index, {}).setdefault(dName, {}).update({value.collection_index:value.text})
+                        else:
+                            if external_id:
+                                if len(value.set_prefix.split('|')) == 1:
+                                    val[uName].setdefault(int(value.set_prefix), {}).setdefault(dName, {}).update({value.set_index:value.external_id})
+                                elif len(value.set_prefix.split('|')) == 2:
+                                    prefix = value.set_prefix.split('|')
+                                    if 'Element' in dName:
+                                        val[uName].setdefault(int(prefix[0]), {}).setdefault(dName.split(' ')[0], {}).setdefault(value.set_index, {}).update({dName.split(' ')[1]:value.external_id})
+                                    else: 
+                                        val[uName].setdefault(int(prefix[0]), {}).setdefault(dName, {}).update({value.set_index:value.external_id})
+                            else:
+                                if len(value.set_prefix.split('|')) == 1: 
+                                    val[uName].setdefault(int(value.set_prefix), {}).setdefault(dName, {}).update({value.set_index:value.text})
+                                elif len(value.set_prefix.split('|')) == 2:
+                                    prefix = value.set_prefix.split('|')
+                                    val[uName].setdefault(int(prefix[0]), {}).setdefault(dName.split(' ')[0], {}).setdefault(value.set_index, {}).update({dName.split(' ')[1]:value.text})
+                    else:
+                        if collection_index:
+                            if external_id:
+                                val[uName].setdefault(int(value.set_prefix), {}).setdefault(dName, {}).update({value.collection_index:value.external_id})
+                            else:
+                                val[uName].setdefault(int(value.set_prefix), {}).setdefault(dName, {}).update({value.collection_index:value.text})
+                        else:
+                            if external_id:
+                                val[uName].setdefault(int(value.set_prefix), {}).update({dName:value.external_id})
+                            else:
+                                val[uName].setdefault(int(value.set_prefix), {}).update({dName:value.text})
+                else:
+                    if set_index:
+                        if collection_index:
+                            if external_id:
+                                val[uName].setdefault(value.set_index, {}).setdefault(dName, {}).update({value.collection_index:value.external_id})
+                            else:
+                                val[uName].setdefault(value.set_index, {}).setdefault(dName, {}).update({value.collection_index:value.text})
+                        else:
+                            if external_id:
+                                val[uName].setdefault(value.set_index, {}).update({dName:value.external_id})
+                            else:
+                                val[uName].setdefault(value.set_index, {}).update({dName:value.text})
+                    else:
+                        if collection_index:
+                            if external_id:
+                                val[uName].setdefault(dName, {}).update({value.collection_index:value.external_id})
+                            else:
+                                val[uName].setdefault(dName, {}).update({value.collection_index:value.text})
+                        else:
+                            if external_id:
+                                val[uName].update({dName:value.external_id})
+                            else:
+                                val[uName].update({dName:value.text})
+            elif value.set_index:
+                if set_prefix:
+                    if set_index:
+                        if collection_index:
+                            val[uName].setdefault(int(value.set_prefix), {}).setdefault(value.set_index, {}).setdefault(dName, {}).update({value.collection_index:None})
+                        else:
+                            val[uName].setdefault(int(value.set_prefix), {}).setdefault(value.set_index, {}).update({dName:None})
+                    else:
+                        if collection_index:
+                            val[uName].setdefault(int(value.set_prefix), {}).setdefault(dName, {}).update({value.collection_index:None})
+                        else:
+                            val[uName].setdefault(int(value.set_prefix), {}).update({dName:None})
+                else:
+                    if set_index:
+                        if collection_index:
+                            val[uName].setdefault(value.set_index, {}).setdefault(dName, {}).update({value.collection_index:None})
+                        else:
+                            val[uName].setdefault(value.set_index, {}).update({dName:None})
+                    else:
+                        if collection_index:
+                            val[uName].setdefault(dName, {}).update({value.collection_index:None})
+                        else:
+                            val[uName].update({dName:None})
+        return val
 

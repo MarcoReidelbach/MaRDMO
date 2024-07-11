@@ -1,0 +1,26 @@
+{% extends 'core/page.html' %}
+{% load i18n %}
+
+{% block page %}
+
+    <h1>{{ title }}</h1>
+    <!DOCTYPE html>
+    <html>
+        <body>
+            <br><br><br>
+            <div align='center'>
+               <p>
+                  <span style="font-family:'Arial';color:DarkSlateBlue;font-size:100px;"><b>Ma</b></span>
+                  <span style="font-family:'Arial';color:white;background-color:DarkSlateBlue;font-size:100px;"><b>RDMO</b></p></span>
+               </p>
+               <br><br><br>
+	       <p style="color:DarkSlateBlue;font-size:30px;">We found {{ noResults }} Workflow(s) on the MaRDI Portal!</p>
+               <p style="color:DarkSlateBlue;font-size:30px;">Here are the Links to the Documentations:</p>
+	       {% for x,y,z in links%}
+                   <p style="color:DarkSlateBlue;font-size:20px;">{{ x }}  ( <a href="{{ y }}" style="color:orange;">Wiki Page</a> - <a href="{{ z }}" style="color:orange;">Knowledge Graph Entry</a> )</p><br>
+               {% endfor %}
+            </div>
+        </body>
+    </html> 
+
+{% endblock %}
