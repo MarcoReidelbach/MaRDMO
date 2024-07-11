@@ -25,6 +25,9 @@ setup(
         'Programming Language :: Python :: 3.10'
     ],
     packages=find_packages(),
+    package_data = {'MaRDMO':['templates/MaRDMO/*.html','templates/MaRDMO/*.md','templates/MaRDMO/*.mediawiki','data/*.json']},
     include_package_data=True,
-    install_requires=['bibtexparser','langdetect','pylatexenc','pypandoc_binary','wikibaseintegrator']
+
+    install_requires=['bibtexparser','langdetect','pylatexenc','wikibaseintegrator']
 )
+
