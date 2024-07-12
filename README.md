@@ -75,7 +75,6 @@ OPTIONSET_PROVIDERS = [
     ('ResearchProblem', _('Options for Research Problems'), 'MaRDMO.providers.ResearchProblem'),
     ('ResearchFieldUser', _('Options for User Research Fields'), 'MaRDMO.providers.ResearchFieldUser'),
     ('ResearchProblemRelations', _('Options for Research Problem Relations'), 'MaRDMO.providers.ResearchProblemRelations'),
-    ('ResearchProblemRelations2', _('Options for Research Problem Relations 2'), 'MaRDMO.providers.ResearchProblemRelations2'),
     ('MathematicalModel', _('Options for Mathematical Models'), 'MaRDMO.providers.MathematicalModel'),
     ('MathematicalModelRelation', _('Options for Mathematical Model Relations'), 'MaRDMO.providers.MathematicalModelRelation'),
     ('MathematicalModelRelation2', _('Options for Mathematical Model Relations 2'), 'MaRDMO.providers.MathematicalModelRelation2'),
@@ -85,11 +84,13 @@ OPTIONSET_PROVIDERS = [
     ('MathematicalFormulation', _('Options for Mathematical Formulation'), 'MaRDMO.providers.MathematicalFormulation'),
     ('MathematicalFormulation2', _('Options for Mathematical Formulation 2'), 'MaRDMO.providers.MathematicalFormulation2'),
     ('QuantityAll', _('Options for all Quantities'), 'MaRDMO.providers.QuantityAll'),
+    ('WorkflowTask', _('Options for Workflow Task'), 'MaRDMO.providers.WorkflowTask'),
     ('Task', _('Options for Task'), 'MaRDMO.providers.Task'),
     ('Task2', _('Options for Task2'), 'MaRDMO.providers.Task2'),
     ('Publication', _('Options for Publications'), 'MaRDMO.providers.Publication'),
     ('AllEntities', _('Options for All Entities'), 'MaRDMO.providers.AllEntities')
     ]
+
 
 ```
 
