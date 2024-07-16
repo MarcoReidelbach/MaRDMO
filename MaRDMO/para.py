@@ -37,6 +37,17 @@ dataProp_mapping = {
                      'timecont': (13, 'IsTimeContinuous', 14, 'IsTimeDiscrete', 15, 'IsTimeIndependent')
                     }
 
+objectProp_mapping = {
+                      'ContainedAsFormulationIn': ('F','FL'),
+                      'ContainedAsAssumptionIn': ('A','AL'),
+                      'ContainedAsBoundaryConditionIn': ('BC','BCL'),
+                      'ContainedAsConstrainedConditionIn': ('CC','CCL'),
+                      'ContainedAsCouplingConditionIn': ('CPC','CPCL'),
+                      'ContainedAsInitialConditionIn': ('IC','ICL'),
+                      'ContainedAsFinalConditionIn': ('FC','FCL')
+                     }
+
+
 class_mapping = {
                  'ResearchProblem': 'Research Problem',
                  'ResearchField': 'Research Field',
