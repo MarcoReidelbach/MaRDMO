@@ -1,9 +1,6 @@
 import requests
-import itertools
-import re, os
+import os
 import json
-
-from django.template import Template, Context
 
 from rdmo.options.providers import Provider
 from rdmo.domain.models import Attribute
@@ -11,8 +8,10 @@ from rdmo.options.models import Option
 
 from multiprocessing.pool import ThreadPool
 
-from .config import *
-from .para import *
+from .config import wikidata_api, mardi_api, mathmoddb_endpoint
+from .para import BASE_URI
+from .sparql import queryProvider
+from .mathmoddb import queryMathModDB
 
 class WikidataSearch(Provider):
     
@@ -45,8 +44,8 @@ class AvailableSoftware(Provider):
     search = True
 
     SUBJECT_ATTRIBUTES = [
-        'http://example.com/terms/domain/MaRDI/Section_4/Set_3/Question_02',
-        'http://example.com/terms/domain/MaRDI/Section_4/Set_3/Question_03'
+        f'{BASE_URI}Section_4/Set_3/Question_02',
+        f'{BASE_URI}Section_4/Set_3/Question_03'
     ]
 
     def get_options(self, project, search):
@@ -142,7 +141,7 @@ class ProcessorProvider(Provider):
 
 class MathAreaProvider(Provider):
     
-    SUBJECT_ATTRIBUTE = 'http://example.com/terms/domain/MaRDI/Section_2/Set_3/Question_00'
+    SUBJECT_ATTRIBUTE = f'{BASE_URI}Section_2/Set_3/Question_00'
 
     def get_options(self, project, search=None):
         """
@@ -162,9 +161,9 @@ class MathAreaProvider(Provider):
 class EnvironmentProvider(Provider):
     
     SUBJECT_ATTRIBUTES = [
-        'http://example.com/terms/domain/MaRDI/Section_4/Set_3/Question_01',
-        'http://example.com/terms/domain/MaRDI/Section_4/Set_3/Question_02',
-        'http://example.com/terms/domain/MaRDI/Section_4/Set_5/Question_02'
+        f'{BASE_URI}Section_4/Set_3/Question_01',
+        f'{BASE_URI}Section_4/Set_3/Question_02',
+        f'{BASE_URI}Section_4/Set_5/Question_02'
     ]
 
     def get_options(self, project, search=None):
@@ -190,8 +189,8 @@ class EnvironmentProvider(Provider):
 class MethodProvider(Provider):
     
     SUBJECT_ATTRIBUTES = [
-        'http://example.com/terms/domain/MaRDI/Section_4/Set_2/Question_01',
-        'http://example.com/terms/domain/MaRDI/Section_4/Set_2/Question_02'
+        f'{BASE_URI}Section_4/Set_2/Question_01',
+        f'{BASE_URI}Section_4/Set_2/Question_02'
     ]
 
     def get_options(self, project, search=None):
@@ -220,8 +219,8 @@ class MethodProvider(Provider):
 class DataProvider(Provider):
     
     SUBJECT_ATTRIBUTES = [
-        'http://example.com/terms/domain/MaRDI/Section_4/Set_6/Question_00',
-        'http://example.com/terms/domain/MaRDI/Section_4/Set_6/Question_01',
+        f'{BASE_URI}Section_4/Set_6/Question_00',
+        f'{BASE_URI}Section_4/Set_6/Question_01',
     ]
 
     def get_options(self, project, search=None):
@@ -247,8 +246,8 @@ class DataProvider(Provider):
 class SoftwareProvider(Provider):
     
     SUBJECT_ATTRIBUTES = [
-        'http://example.com/terms/domain/MaRDI/Section_4/Set_3/Question_01',
-        'http://example.com/terms/domain/MaRDI/Section_4/Set_3/Question_02'
+        f'{BASE_URI}Section_4/Set_3/Question_01',
+        f'{BASE_URI}Section_4/Set_3/Question_02'
     ]
 
     def get_options(self, project, search=None):
@@ -274,145 +273,80 @@ class SoftwareProvider(Provider):
         return options
 
 class ResearchField(Provider):
-   
+
     search = True
 
-    def get_options(self, project, search):
+    def get_options(self, project, search=None):
 
-        if not search or len(search) < 3:
+        options = MathModDBProvider(search,queryProvider['RF'])
+        
+        return options
+    
+class ResearchFieldRelations(Provider):
+
+    search = True
+
+    def get_options(self, project, search=None):
+        
+        if not search:
             return []
 
-        query = '''PREFIX : <https://mardi4nfdi.de/mathmoddb>  
-                        SELECT DISTINCT ?answer (GROUP_CONCAT(DISTINCT(?l); SEPARATOR=" / ") AS ?label)  
-                        WHERE { 
-                               ?answer a <https://mardi4nfdi.de/mathmoddb#ResearchField> .
-                               ?answer <http://www.w3.org/2000/01/rdf-schema#label> ?l .
-                               FILTER (lang(?l) = 'en')
-                               }
-                        GROUP BY ?answer ?label'''
+        # Fetch research fields from the MathModDB knowledge graph
+        results = queryMathModDB(queryProvider['RF'])
 
-        req=requests.get('https://sparql.ta4.m1.mardi.ovh/mathalgodb/query',
-                         params = {'format': 'json', 'query': query},
-                         headers = {'User-Agent': 'MaRDMO_0.1 (https://zib.de; reidelbach@zib.de)'}).json()['results']['bindings']
-
+        # Extract options from the knowledge graph
         dic = {}
-
-        for r in req:
-            dic.update({r['label']['value']:{'id':r['answer']['value']}})
-
         options = []
+        
+        for result in results:
+            dic.update({result['label']['value']:{'id':result['answer']['value']}})
 
-        options.extend([{'id': dic[key]['id'] + ' <|> ' + key, 'text': key } for key in dic if search.lower() in key.lower()])
+        # Fetch user-defined research fields from the project
+        values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_0/Question_3'))
+        values2 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_0/Question_0'))
 
+        for value1 in values1: 
+            if value1.text:
+                dic.update({value1.text: {'id': value1.external_id}})
+
+        for idx, value2 in enumerate(values2): 
+            if value2.text:
+                dic.update({value2.text: {'id': f"{idx} <|> {value2.text}"}})
+
+        options.extend([{'id': f"{dic[key]['id']} <|> {key}", 'text': key } for key in dic if search.lower() in key.lower()])
+
+        options = sorted(options, key=lambda option: option['text'])
+    
+        return options
+    
+class ResearchProblem(Provider):
+
+    search = True
+
+    def get_options(self, project, search=None):
+
+        options = MathModDBProvider(search,queryProvider['RP'])
+
+        return options
+    
+class MathematicalModel(Provider):
+
+    search = True
+
+    def get_options(self, project, search=None):
+
+        options = MathModDBProvider(search,queryProvider['MM'])
+        
         return options
 
 class Publication(Provider):
 
     search = True
 
-    def get_options(self, project, search):
-
-        if not search or len(search) < 3:
-            return []
-
-        query = '''PREFIX : <https://mardi4nfdi.de/mathmoddb>  
-                        SELECT DISTINCT ?answer (GROUP_CONCAT(DISTINCT(?l); SEPARATOR=" / ") AS ?label)  
-                        WHERE { 
-                               ?answer a <https://mardi4nfdi.de/mathmoddb#Publication> .
-                               ?answer <http://www.w3.org/2000/01/rdf-schema#label> ?l .
-                               FILTER (lang(?l) = 'en')
-                               }
-                        GROUP BY ?answer ?label'''
-
-        req=requests.get('https://sparql.ta4.m1.mardi.ovh/mathalgodb/query',
-                         params = {'format': 'json', 'query': query},
-                         headers = {'User-Agent': 'MaRDMO_0.1 (https://zib.de; reidelbach@zib.de)'}).json()['results']['bindings']
-
-        dic = {}
-
-        for r in req:
-            dic.update({r['label']['value']:{'id':r['answer']['value']}})
-
-        options = []
-
-        options.extend([{'id': dic[key]['id'] + ' <|> ' + key, 'text': key } for key in dic if search.lower() in key.lower()])
-
-        return options
-
-class ResearchFieldRelations(Provider):
-
-    search = True
-
     def get_options(self, project, search=None):
-        if not search or len(search) < 3:
-            return []
 
-        query = '''PREFIX : <https://mardi4nfdi.de/mathmoddb>  
-                        SELECT DISTINCT ?answer (GROUP_CONCAT(DISTINCT(?l); SEPARATOR=" / ") AS ?label)  
-                        WHERE { 
-                               ?answer a <https://mardi4nfdi.de/mathmoddb#ResearchField> .
-                               ?answer <http://www.w3.org/2000/01/rdf-schema#label> ?l .
-                               FILTER (lang(?l) = 'en')
-                               }
-                        GROUP BY ?answer ?label'''
-
-        req=requests.get('https://sparql.ta4.m1.mardi.ovh/mathalgodb/query',
-                          params = {'format': 'json', 'query': query},
-                          headers = {'User-Agent': 'MaRDMO_0.1 (https://zib.de; reidelbach@zib.de)'}).json()['results']['bindings']
-
-
-        dic = {}
-
-        for r in req:
-            dic.update({r['label']['value']:{'id':r['answer']['value']}})
-
-        values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_0/Question_3'))
-        values2 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_0/Question_0'))
-
-        for idx, value1 in enumerate(values1):
-            if value1.text:
-                dic.update({value1.text:{'id':value1.external_id}})
-        for idx, value2 in enumerate(values2):
-            if value2.text:
-                dic.update({value2.text:{'id':str(idx)}})
-
+        options = MathModDBProvider(search,queryProvider['P'])
         
-        options = []
-        options.extend([{'id': dic[key]['id'] + ' <|> ' + key if len(dic[key]['id'].split(' <|> ')) == 1 else dic[key]['id'], 'text': key } for key in dic if search.lower() in key.lower()])
-
-        return options
-
-class ResearchProblem(Provider):
-
-    search = True
-
-    def get_options(self, project, search):
-
-        if not search or len(search) < 3:
-            return []
-
-        query = '''PREFIX : <https://mardi4nfdi.de/mathmoddb>  
-                        SELECT DISTINCT ?answer (GROUP_CONCAT(DISTINCT(?l); SEPARATOR=" / ") AS ?label)  
-                        WHERE { 
-                               ?answer a <https://mardi4nfdi.de/mathmoddb#ResearchProblem> .
-                               ?answer <http://www.w3.org/2000/01/rdf-schema#label> ?l .
-                               FILTER (lang(?l) = 'en')
-                               }
-                        GROUP BY ?answer ?label'''
-
-        req=requests.get('https://sparql.ta4.m1.mardi.ovh/mathalgodb/query',
-                         params = {'format': 'json', 'query': query},
-                         headers = {'User-Agent': 'MaRDMO_0.1 (https://zib.de; reidelbach@zib.de)'}).json()['results']['bindings']
-
-        dic = {}
-
-        for r in req:
-            dic.update({r['label']['value']:{'id':r['answer']['value']}})
-
-        options = []
-
-        options.extend([{'id': dic[key]['id'] + ' <|> ' + key, 'text': key } for key in dic if search.lower() in key.lower()])
-
         return options
 
 class ResearchProblemRelations(Provider):
@@ -420,40 +354,35 @@ class ResearchProblemRelations(Provider):
     search = True
 
     def get_options(self, project, search=None):
-        if not search or len(search) < 3:
-            return []
         
-        query = '''PREFIX : <https://mardi4nfdi.de/mathmoddb>  
-                        SELECT DISTINCT ?answer (GROUP_CONCAT(DISTINCT(?l); SEPARATOR=" / ") AS ?label)  
-                        WHERE { 
-                               ?answer a <https://mardi4nfdi.de/mathmoddb#ResearchProblem> .
-                               ?answer <http://www.w3.org/2000/01/rdf-schema#label> ?l .
-                               FILTER (lang(?l) = 'en')
-                               }
-                        GROUP BY ?answer ?label'''
+        if not search:
+            return []
 
-        req=requests.get('https://sparql.ta4.m1.mardi.ovh/mathalgodb/query',
-                          params = {'format': 'json', 'query': query},
-                          headers = {'User-Agent': 'MaRDMO_0.1 (https://zib.de; reidelbach@zib.de)'}).json()['results']['bindings']
-
-
+        # Fetch research problems from the MathModDB knowledge graph
+        results = queryMathModDB(queryProvider['RP'])
+        
+        # Extract options from the knowledge graph
         dic = {}
-
-        for r in req:
-            dic.update({r['label']['value']:{'id':r['answer']['value']}})
-
-        values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_1/Question_5'))
-        values2 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_1/Question_0'))
-
-        for idx, value1 in enumerate(values1):
-            if value1.text:
-                dic.update({value1.text:{'id':value1.external_id}})
-        for idx, value2 in enumerate(values2):
-            if value2.text:
-                dic.update({value2.text:{'id':str(idx)}})
-
         options = []
-        options.extend([{'id': dic[key]['id'] + ' <|> ' + key if len(dic[key]['id'].split(' <|> ')) == 1 else dic[key]['id'], 'text': key } for key in dic if search.lower() in key.lower()])
+        
+        for result in results:
+            dic.update({result['label']['value']:{'id':result['answer']['value']}})
+
+        # Fetch user-defined research fields from the project
+        values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_1/Question_5'))
+        values2 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_1/Question_0'))
+
+        for value1 in values1: 
+            if value1.text:
+                dic.update({value1.text: {'id': value1.external_id}})
+
+        for idx, value2 in enumerate(values2): 
+            if value2.text:
+                dic.update({value2.text: {'id': f"{idx} <|> {value2.text}"}})
+
+        options.extend([{'id': f"{dic[key]['id']} <|> {key}", 'text': key } for key in dic if search.lower() in key.lower()])
+
+        options = sorted(options, key=lambda option: option['text'])
 
         return options
 
@@ -461,142 +390,60 @@ class ResearchFieldUser(Provider):
 
         def get_options(self, project, search=None):
         
-            dic = {}
-    
-            values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_0/Question_3'))
-            values2 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_0/Question_0'))
-            values3 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3/Set_0/Set_0/Question_04'))
+            values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_0/Question_3'))
+            values2 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_0/Question_0'))
+            values3 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3/Set_0/Set_0/Question_04'))
+
+            options = []
 
             for idx, value1 in enumerate(values1):
                 if value1.text:
-                    dic.update({value1.text:{'id':value1.external_id}})
+                    options.extend([{'id': value1.external_id, 'text': value1.text}])
             for idx, value2 in enumerate(values2):
                 if value2.text:
-                    dic.update({value2.text:{'id':str(idx)}})
+                    options.extend([{'id': f"{idx} <|> {value2.text}", 'text': value2.text}])
             for idx, value3 in enumerate(values3):
                 if value3.text and value3.text != 'not in MathModDB':
-                    dic.update({value3.text:{'id':value3.external_id}})
+                    options.extend([{'id': value3.external_id, 'text': value3.text}])
 
-            options = []
-            options.extend([{'id': dic[key]['id'] + ' <|> ' + key if len(dic[key]['id'].split(' <|> ')) == 1 else dic[key]['id'], 'text': key } for key in dic])
-            
+            options = sorted(options, key=lambda option: option['text'])
+
             return options
-
-class MathematicalModel(Provider):
-
-    search = True
-    refresh = True
-
-    def get_options(self, project, search):
-        
-        if not search or len(search) < 3:
-            return []
-
-        query = '''PREFIX : <https://mardi4nfdi.de/mathmoddb>  
-                        SELECT DISTINCT ?answer (GROUP_CONCAT(DISTINCT(?l); SEPARATOR=" / ") AS ?label)  
-                        WHERE { 
-                               ?answer a <https://mardi4nfdi.de/mathmoddb#MathematicalModel> .
-                               ?answer <http://www.w3.org/2000/01/rdf-schema#label> ?l .
-                               FILTER (lang(?l) = 'en')
-                               }
-                        GROUP BY ?answer ?label'''
-
-        req=requests.get('https://sparql.ta4.m1.mardi.ovh/mathalgodb/query',
-                         params = {'format': 'json', 'query': query},
-                         headers = {'User-Agent': 'MaRDMO_0.1 (https://zib.de; reidelbach@zib.de)'}).json()['results']['bindings']
-
-        dic = {}
-
-        for r in req:
-            dic.update({r['label']['value']:{'id':r['answer']['value']}})
-
-        options = []
-
-        options.extend([{'id': dic[key]['id'] + ' <|> ' + key, 'text': key } for key in dic if search.lower() in key.lower()])
-        
-        return options
-
-class MathematicalModel2(Provider):
-
-    search = True
-
-    def get_options(self, project, search):
-
-        if not search or len(search) < 3:
-            return []
-
-        query = '''PREFIX : <https://mardi4nfdi.de/mathmoddb>  
-                        SELECT DISTINCT ?answer (GROUP_CONCAT(DISTINCT(?l); SEPARATOR=" / ") AS ?label)  
-                        WHERE { 
-                               ?answer a <https://mardi4nfdi.de/mathmoddb#MathematicalModel> .
-                               ?answer <http://www.w3.org/2000/01/rdf-schema#label> ?l .
-                               FILTER (lang(?l) = 'en')
-                               }
-                        GROUP BY ?answer ?label'''
-
-        req=requests.get('https://sparql.ta4.m1.mardi.ovh/mathalgodb/query',
-                         params = {'format': 'json', 'query': query},
-                         headers = {'User-Agent': 'MaRDMO_0.1 (https://zib.de; reidelbach@zib.de)'}).json()['results']['bindings']
-
-        dic = {}
-
-        for r in req:
-            dic.update({r['label']['value']:{'id':r['answer']['value']}})
-
-        options = []
-
-        options.extend([{'id': dic[key]['id'] + ' <|> ' + key, 'text': key } for key in dic if search.lower() in key.lower()])
-
-        return options
-
 
 class MathematicalModelRelation(Provider):
 
     search = True
 
     def get_options(self, project, search=None):
-        if not search or len(search) < 3:
+
+        if not search:
             return []
-
-        query = '''PREFIX : <https://mardi4nfdi.de/mathmoddb>  
-                        SELECT DISTINCT ?answer (GROUP_CONCAT(DISTINCT(?l); SEPARATOR=" / ") AS ?label)  
-                        WHERE { 
-                               ?answer a <https://mardi4nfdi.de/mathmoddb#MathematicalModel> .
-                               ?answer <http://www.w3.org/2000/01/rdf-schema#label> ?l .
-                               FILTER (lang(?l) = 'en')
-                               }
-                        GROUP BY ?answer ?label'''
-
-        req=requests.get('https://sparql.ta4.m1.mardi.ovh/mathalgodb/query',
-                          params = {'format': 'json', 'query': query},
-                          headers = {'User-Agent': 'MaRDMO_0.1 (https://zib.de; reidelbach@zib.de)'}).json()['results']['bindings']
-
-
+        
+        # Fetch mathematical models from the MathModDB knowledge graph
+        results = queryMathModDB(queryProvider['MM'])
+        
+        # Extract options from the knowledge graph
         dic = {}
-
-        for r in req:
-            dic.update({r['label']['value']:{'id':r['answer']['value']}})
-
-        values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_2/Question_0'))
-        values2 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_2/Set_1/Question_0'))
-        values3 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_2/Set_1/Question_1'))
-        values4 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3/Set_0/Set_0/Question_01'))
-
-        for idx, value1 in enumerate(values1):
-            if value1.text:
-                dic.update({value1.text:{'id':value1.external_id}})
-        for idx, value2 in enumerate(values2):
-            if value2.text:
-                dic.update({value2.text:{'id':str(idx)}})
-        for idx, value3 in enumerate(values3):
-            if value3.text:
-                dic.update({value3.text:{'id':str(idx)}})
-        for idx, value4 in enumerate(values4):
-            if value4.text:
-                dic.update({value4.text:{'id':str(idx)}})
-
         options = []
-        options.extend([{'id': dic[key]['id'] + ' <|> ' + key, 'text': key } for key in dic if search.lower() in key.lower()])
+        
+        for result in results:
+            dic.update({result['label']['value']:{'id':result['answer']['value']}})
+
+        # Fetch user-defined research fields from the project
+        values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_2/Set_1/Question_0'))
+        values2 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_2/Set_1/Question_1'))
+
+        for value1 in values1: 
+            if value1.text:
+                dic.update({value1.text: {'id': value1.external_id}})
+
+        for idx, value2 in enumerate(values2): 
+            if value2.text:
+                dic.update({value2.text: {'id': f"{idx} <|> {value2.text}"}})
+
+        options.extend([{'id': f"{dic[key]['id']} <|> {key}", 'text': key } for key in dic if search.lower() in key.lower()])
+
+        options = sorted(options, key=lambda option: option['text'])
 
         return options
 
@@ -604,39 +451,25 @@ class MathematicalModelRelation2(Provider):
 
     def get_options(self, project, search=None):
 
-        dic = {}
-
-        values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3/Set_0/Set_0/Question_00'))
-        values2 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3/Set_0/Set_0/Question_01'))
-        values3 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_2/Question_0'))
-        values4 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_2/Set_1/Question_0'))
-        values5 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_2/Set_1/Question_1'))
-        values6 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3/Set_0/Wiki_01'))
+        options = []
+        
+        values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_2/Question_0'))
+        values2 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_2/Set_1/Question_0'))
+        values3 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_2/Set_1/Question_1'))
 
         for idx, value1 in enumerate(values1):
-            if value1.text:
-                dic.update({value1.text:{'id':value1.external_id}})
+            if value1.text and value1.text != 'not in MathModDB':
+                options.extend([{'id': value1.external_id, 'text': value1.text}])
         for idx, value2 in enumerate(values2):
             if value2.text:
-                dic.update({value2.text:{'id':str(idx)}})
+                options.extend([{'id': value2.external_id, 'text': value2.text}])
         for idx, value3 in enumerate(values3):
-            if value3.text and value3.text != 'not in MathModDB':
-                dic.update({value3.text:{'id':value3.external_id}})
-        for idx, value4 in enumerate(values4):
-            if value4.text:
-                dic.update({value4.text:{'id':value4.external_id}})
-        for idx, value5 in enumerate(values5):
-            if value5.text:
-                dic.update({value5.text:{'id':str(idx)}})
-        for idx, value6 in enumerate(values6):
-            if value6.text and value6.text != 'not in MathModDB':
-                dic.update({value6.text:{'id':value6.external_id}})
-
-        options = []
-        options.extend([{'id': dic[key]['id'] + ' <|> ' + key if len(dic[key]['id'].split(' <|> ')) == 1 else dic[key]['id'], 'text': key } for key in dic])
+            if value3.text:
+                options.extend([{'id': f"{idx} <|> {value3.text}", 'text': value3.text}])
         
-        return options
+        options = sorted(options, key=lambda option: option['text'])
 
+        return options
 
 class Quantity(Provider):
 
@@ -644,214 +477,140 @@ class Quantity(Provider):
 
     def get_options(self, project, search):
 
-        if not search or len(search) < 3:
-            return []
-
-        query = '''PREFIX : <https://mardi4nfdi.de/mathmoddb>  
-                        SELECT DISTINCT ?answer1 (GROUP_CONCAT(DISTINCT(?l1); SEPARATOR=" / ") AS ?label1) ?answer2 (GROUP_CONCAT(DISTINCT(?l2); SEPARATOR=" / ") AS ?label2) 
-                        WHERE { 
-                               ?answer1 a <https://mardi4nfdi.de/mathmoddb#Quantity> .
-                               ?answer1 <http://www.w3.org/2000/01/rdf-schema#label> ?l1 .
-                               ?answer2 a <https://mardi4nfdi.de/mathmoddb#QuantityKind> .
-                               ?answer2 <http://www.w3.org/2000/01/rdf-schema#label> ?l2 .
-                               FILTER (lang(?l1) = 'en')
-                               FILTER (lang(?l2) = 'en')
-                               }
-                        GROUP BY ?answer1 ?answer2 ?label1 ?label2'''
-
-        req = requests.get('https://sparql.ta4.m1.mardi.ovh/mathalgodb/query',
-                          params = {'format': 'json', 'query': query},
-                          headers = {'User-Agent': 'MaRDMO_0.1 (https://zib.de; reidelbach@zib.de)'}).json()['results']['bindings']
-
-        dic1 = {}
-        dic2 = {}
-
-        for r in req:
-            dic1.update({r['label1']['value'] + ' (Quantity)':{'id':r['answer1']['value']}})
-            dic2.update({r['label2']['value'] + ' (QuantityKind)':{'id':r['answer2']['value']}})
-
-        options = []
-
-        options.extend([{'id': dic1[key]['id'] + ' <|> ' + key, 'text': key} for key in dic1 if search.lower() in key.lower()])
-        options.extend([{'id': dic2[key]['id'] + ' <|> ' + key, 'text': key} for key in dic2 if search.lower() in key.lower()])
+        options = MathModDBProvider(search,queryProvider['QQK'])
 
         return options
 
 class QuantityRelations(Provider):
 
+    search = True
+
     path = os.path.join(os.path.dirname(__file__), 'data', 'mathmoddb.json')
 
     with open(path, "r") as json_file:
         mathmoddb = json.load(json_file)
 
-    search = True
-
     def get_options(self, project, search=None):
 
-        if not search or len(search) < 3:
+        if not search:
             return []
-        
-        query = '''PREFIX : <https://mardi4nfdi.de/mathmoddb>  
-                        SELECT DISTINCT ?answer (GROUP_CONCAT(DISTINCT(?l); SEPARATOR=" / ") AS ?label)  
-                        WHERE { 
-                               ?answer a <https://mardi4nfdi.de/mathmoddb#Quantity> .
-                               ?answer <http://www.w3.org/2000/01/rdf-schema#label> ?l .
-                               FILTER (lang(?l) = 'en')
-                               }
-                        GROUP BY ?answer ?label'''
 
-        req=requests.get('https://sparql.ta4.m1.mardi.ovh/mathalgodb/query',
-                          params = {'format': 'json', 'query': query},
-                          headers = {'User-Agent': 'MaRDMO_0.1 (https://zib.de; reidelbach@zib.de)'}).json()['results']['bindings']
-
+        # Fetch quantities from th MathModDB knowledge graph
+        results = queryMathModDB(queryProvider['Q'])
         
+        # Extract options from the knowledge graph
         dic = {}
-
-        for r in req:
-            dic.update({r['label']['value']:{'id':r['answer']['value']}})
-
-        values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_3/Question_6'))
-        values2 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_3/Question_5'))
-        values3 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_3/Question_0'))
-
-        for idx, value1 in enumerate(values1):
-            if value1.option == Option.objects.get(uri=self.mathmoddb['Quantity']):
-                for idx, value2 in enumerate(values2):
-                    if value2.text and value1.set_index == value2.set_index:
-                        dic.update({value2.text:{'id':value2.external_id}})
-                for idx, value3 in enumerate(values3):
-                    if value3.text and value1.set_index == value3.set_index:
-                        dic.update({value3.text:{'id':str(idx)}})
-
         options = []
-        options.extend([{'id': dic[key]['id'] + ' <|> ' + key if len(dic[key]['id'].split(' <|> ')) == 1 else dic[key]['id'], 'text': key } for key in dic if search.lower() in key.lower()])
+        
+        for result in results:
+            dic.update({result['label']['value']:{'id':result['answer']['value']}})
+
+        values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_3/Question_6'))
+        values2 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_3/Question_5'))
+        values3 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_3/Question_0'))
+
+        for value1 in values1:
+            if value1.option == Option.objects.get(uri=self.mathmoddb['QuantityClass']):
+                for value2 in values2: 
+                    if value2.text and value1.set_index == value2.set_index:
+                        dic.update({value2.text: {'id': value2.external_id}})
+                for idx, value3 in enumerate(values3): 
+                    if value3.text and value1.set_index == value3.set_index:
+                        dic.update({value3.text: {'id': f"{idx} <|> {value3.text}"}})
+
+        options.extend([{'id': f"{dic[key]['id']} <|> {key}", 'text': key } for key in dic if search.lower() in key.lower()])
+
+        options = sorted(options, key=lambda option: option['text'])
 
         return options
 
 class QuantityKindRelations(Provider):
 
+    search =True
+
     path = os.path.join(os.path.dirname(__file__), 'data', 'mathmoddb.json')
 
     with open(path, "r") as json_file:
         mathmoddb = json.load(json_file)
 
-    search = True
-
     def get_options(self, project, search=None):
 
-        if not search or len(search) < 3:
+        if not search:
             return []
 
-        query = '''PREFIX : <https://mardi4nfdi.de/mathmoddb>  
-                        SELECT DISTINCT ?answer (GROUP_CONCAT(DISTINCT(?l); SEPARATOR=" / ") AS ?label)  
-                        WHERE { 
-                               ?answer a <https://mardi4nfdi.de/mathmoddb#QuantityKind> .
-                               ?answer <http://www.w3.org/2000/01/rdf-schema#label> ?l .
-                               FILTER (lang(?l) = 'en')
-                               }
-                        GROUP BY ?answer ?label'''
+        # Fetch quantities from th MathModDB knowledge graph
+        results = queryMathModDB(queryProvider['QK'])
 
-        req=requests.get('https://sparql.ta4.m1.mardi.ovh/mathalgodb/query',
-                          params = {'format': 'json', 'query': query},
-                          headers = {'User-Agent': 'MaRDMO_0.1 (https://zib.de; reidelbach@zib.de)'}).json()['results']['bindings']
-
-
+        # Extract options from the knowledge graph
         dic = {}
-
-        for r in req:
-            dic.update({r['label']['value']:{'id':r['answer']['value']}})
-
-        values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_3/Question_6'))
-        values2 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_3/Question_5'))
-        values3 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_3/Question_0'))
-
-        for idx, value1 in enumerate(values1):
-            if value1.option == Option.objects.get(uri=self.mathmoddb['QuantityKind']):
-                for idx, value2 in enumerate(values2):
-                    if value2.text and value1.set_index == value2.set_index:
-                        dic.update({value2.text:{'id':value2.external_id}})
-                for idx, value3 in enumerate(values3):
-                    if value3.text and value1.set_index == value3.set_index:
-                        dic.update({value3.text:{'id':str(idx)}})
-
         options = []
-        options.extend([{'id': dic[key]['id'] + ' <|> ' + key if len(dic[key]['id'].split(' <|> ')) == 1 else dic[key]['id'], 'text': key } for key in dic if search.lower() in key.lower()])
+        
+        for result in results:
+            dic.update({result['label']['value']:{'id':result['answer']['value']}})
+
+        values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_3/Question_6'))
+        values2 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_3/Question_5'))
+        values3 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_3/Question_0'))
+
+        for value1 in values1:
+            if value1.option == Option.objects.get(uri=self.mathmoddb['QuantityKindClass']):
+                for value2 in values2: 
+                    if value2.text and value1.set_index == value2.set_index:
+                        dic.update({value2.text: {'id': value2.external_id}})
+                for idx, value3 in enumerate(values3): 
+                    if value3.text and value1.set_index == value3.set_index:
+                        dic.update({value3.text: {'id': f"{idx} <|> {value3.text}"}})
+
+        options.extend([{'id': f"{dic[key]['id']} <|> {key}", 'text': key } for key in dic if search.lower() in key.lower()])
+
+        options = sorted(options, key=lambda option: option['text'])
 
         return options
-
 
 class MathematicalFormulation(Provider):
 
     search = True
 
-    def get_options(self, project, search):
+    def get_options(self, project, search=None):
 
-        if not search or len(search) < 3:
-            return []
-
-        query = '''PREFIX : <https://mardi4nfdi.de/mathmoddb>  
-                        SELECT DISTINCT ?answer (GROUP_CONCAT(DISTINCT(?l); SEPARATOR=" / ") AS ?label)  
-                        WHERE { 
-                               ?answer a <https://mardi4nfdi.de/mathmoddb#MathematicalFormulation> .
-                               ?answer <http://www.w3.org/2000/01/rdf-schema#label> ?l .
-                               FILTER (lang(?l) = 'en')
-                               }
-                        GROUP BY ?answer ?label'''
-
-        req=requests.get('https://sparql.ta4.m1.mardi.ovh/mathalgodb/query',
-                         params = {'format': 'json', 'query': query},
-                         headers = {'User-Agent': 'MaRDMO_0.1 (https://zib.de; reidelbach@zib.de)'}).json()['results']['bindings']
-
-        dic = {}
-
-        for r in req:
-            dic.update({r['label']['value']:{'id':r['answer']['value']}})
-
-        options = []
-        options.extend([{'id': dic[key]['id'] + ' <|> ' + key, 'text': key } for key in dic if search.lower() in key.lower()])
-
+        options = MathModDBProvider(search,queryProvider['MF'])
+        
         return options
-
 
 class MathematicalFormulation2(Provider):
 
     search = True
 
-    def get_options(self, project, search):
-
-        if not search or len(search) < 3:
+    def get_options(self, project, search=None):
+        
+        if not search:
             return []
 
-        query = '''PREFIX : <https://mardi4nfdi.de/mathmoddb>  
-                        SELECT DISTINCT ?answer (GROUP_CONCAT(DISTINCT(?l); SEPARATOR=" / ") AS ?label)  
-                        WHERE { 
-                               ?answer a <https://mardi4nfdi.de/mathmoddb#MathematicalFormulation> .
-                               ?answer <http://www.w3.org/2000/01/rdf-schema#label> ?l .
-                               FILTER (lang(?l) = 'en')
-                               }
-                        GROUP BY ?answer ?label'''
-
-        req=requests.get('https://sparql.ta4.m1.mardi.ovh/mathalgodb/query',
-                         params = {'format': 'json', 'query': query},
-                         headers = {'User-Agent': 'MaRDMO_0.1 (https://zib.de; reidelbach@zib.de)'}).json()['results']['bindings']
-
+        # Fetch mathematical models from the MathModDB knowledge graph
+        results = queryMathModDB(queryProvider['MF'])
+        
+        # Extract options from the knowledge graph
         dic = {}
-
-        for r in req:
-            dic.update({r['label']['value']:{'id':r['answer']['value']}})
-
-        values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_5/Set_4/Question_0'))
-        values2 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_5/Set_4/Question_1'))
-
-        for idx, value1 in enumerate(values1):
-            if value1.text:
-                dic.update({value1.text:{'id':value1.external_id}})
-        for idx, value2 in enumerate(values2):
-            if value2.text:
-                dic.update({value2.text:{'id':str(idx)}})
-    
         options = []
-        options.extend([{'id': dic[key]['id'] + ' <|> ' + key if len(dic[key]['id'].split(' <|> ')) == 1 else dic[key]['id'], 'text': key } for key in dic if search.lower() in key.lower()])
+        
+        for result in results:
+            dic.update({result['label']['value']:{'id':result['answer']['value']}})
+
+        # Fetch user-defined research fields from the project
+        values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_5/Set_4/Question_0'))
+        values2 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_5/Set_4/Question_1'))
+
+        for value1 in values1: 
+            if value1.text:
+                dic.update({value1.text: {'id': value1.external_id}})
+
+        for idx, value2 in enumerate(values2): 
+            if value2.text:
+                dic.update({value2.text: {'id': f"{idx} <|> {value2.text}"}})
+
+        options.extend([{'id': f"{dic[key]['id']} <|> {key}", 'text': key } for key in dic if search.lower() in key.lower()])
+
+        options = sorted(options, key=lambda option: option['text'])
 
         return options
 
@@ -864,67 +623,58 @@ class QuantityAll(Provider):
 
     def get_options(self, project, search=None):
 
-        dic = {}
+        values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3/Set_0/Set_0/Question_07'))
+        values2 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_3/Question_5'))
+        values3 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_3/Question_0'))
+        values4 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_3/Question_6'))
 
-        values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3/Set_0/Set_0/Question_07'))
-        values2 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_3/Question_5'))
-        values3 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_3/Question_0'))
-        values4 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_3/Question_6'))
+        options = []
 
         for idx, value1 in enumerate(values1):
             if value1.text and value1.text != 'not in MathModDB':
-                dic.update({value1.text:{'id':value1.external_id}})
-        for idx, value4 in enumerate(values4):
-            if value4.option == Option.objects.get(uri=self.mathmoddb['Quantity']):
-                for idx, value2 in enumerate(values2):
-                    if value2.text and value4.set_index == value2.set_index:
-                        Id,label,quote = value2.external_id.split(' <|> ')
-                        dic.update({label + ' (Quantity)':{'id': Id + ' <|> ' + label + ' (Quantity) <|> ' + quote}})
-                for idx, value3 in enumerate(values3):
-                    if value3.text and value4.set_index == value3.set_index:
-                        dic.update({value3.text + ' (Quantity)':{'id':str(idx)}})
-            elif value4.option == Option.objects.get(uri=self.mathmoddb['QuantityKind']):
-                for idx, value2 in enumerate(values2):
-                    if value2.text and value4.set_index == value2.set_index:
-                        Id,label,quote = value2.external_id.split(' <|> ')
-                        dic.update({label + ' (QuantityKind)':{'id': Id + ' <|> ' + label + ' (QuantityKind) <|> ' + quote}})
-                for idx, value3 in enumerate(values3):
-                    if value3.text and value4.set_index == value3.set_index:
-                        dic.update({value3.text + ' (QuantityKind)':{'id':str(idx)}})
+                options.extend([{'id': value1.external_id, 'text': value1.text}])
 
-        options = []
-        options.extend([{'id': dic[key]['id'] + ' <|> ' + key if len(dic[key]['id'].split(' <|> ')) == 1 else dic[key]['id'], 'text': key } for key in dic])
+        for idx, value4 in enumerate(values4):
+            if value4.option == Option.objects.get(uri=self.mathmoddb['QuantityClass']):
+                for idx, value2 in enumerate(values2):
+                    if value2.text and value4.set_prefix == value2.set_prefix:
+                        Id,label,quote = value2.external_id.split(' <|> ')
+                        options.extend([{'id': f"{Id} <|> {label} <|> Quantity", 'text': f"{label} (Quantity)"}])
+                for idx, value3 in enumerate(values3):
+                    if value3.text and value4.set_prefix == value3.set_prefix:
+                        options.extend([{'id': f"{idx} <|> {value3.text} <|> Quantity", 'text': f"{value3.text} (Quantity)"}])
+            elif value4.option == Option.objects.get(uri=self.mathmoddb['QuantityKindClass']):
+                for idx, value2 in enumerate(values2):
+                    if value2.text and value4.set_prefix == value2.set_prefix:
+                        Id,label,quote = value2.external_id.split(' <|> ')
+                        options.extend([{'id': f"{Id} <|> {label} <|> QuantityKind", 'text': f"{label} (Quantity Kind)"}])
+                for idx, value3 in enumerate(values3):
+                    if value3.text and value4.set_prefix == value3.set_prefix:
+                        options.extend([{'id': f"{idx} <|> {value3.text} <|> QuantityKind", 'text': f"{value3.text} (Quantity Kind)"}])
+
+        # Sort user options by text
+        options = sorted(options, key=lambda option: option['text'])
 
         return options
 
 class WorkflowTask(Provider):
 
-    def get_options(self, project, search):
+    def get_options(self, project, search=None):
 
-        values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3/Set_0/Wiki_01'))
+        values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3/Set_0/Wiki_01'))
 
         model = ''
+        options = []
+
         for value1 in values1:
             if value1.text:
-                model = value1.external_id.split(' <|> ')[0]
+                model = f":{value1.external_id.split(' <|> ')[0].split('#')[1]}"
         
-        options = []
         if model:
-        
-            query = '''PREFIX : <https://mardi4nfdi.de/mathmoddb#>
-                       SELECT DISTINCT ?answer (GROUP_CONCAT(DISTINCT(?l); SEPARATOR=" / ") AS ?label)
-                       WHERE {{
-                              <{0}> :appliedByTask ?answer .
-                              ?answer <http://www.w3.org/2000/01/rdf-schema#label> ?l .
-                            FILTER (lang(?l) = 'en')
-                            }}
-                       GROUP BY ?answer ?label'''
-            
-            req=requests.get('https://sparql.ta4.m1.mardi.ovh/mathalgodb/query',
-                             params = {'format': 'json', 'query': query.format(model)},
-                             headers = {'User-Agent': 'MaRDMO_0.1 (https://zib.de; reidelbach@zib.de)'}).json()['results']['bindings']
+            # Fetch tasks from the MathModDB knowledge graph
+            results = queryMathModDB(queryProvider['RT'].format(model))
 
-            options.extend([{'id': r['answer']['value'] + ' <|> ' + r['label']['value'], 'text': r['label']['value']} for r in req])      
+            options.extend([{'id': f"{result['answer']['value']} <|> {result['label']['value']}", 'text': result['label']['value']} for result in results])      
         
         return options
 
@@ -932,32 +682,9 @@ class Task(Provider):
 
     search = True
 
-    def get_options(self, project, search):
+    def get_options(self, project, search=None):
 
-        if not search or len(search) < 3:
-            return []
-
-        query = '''PREFIX : <https://mardi4nfdi.de/mathmoddb>
-                   SELECT DISTINCT ?answer (GROUP_CONCAT(DISTINCT(?l); SEPARATOR=" / ") AS ?label)
-                   WHERE {
-                          ?subclass <http://www.w3.org/2000/01/rdf-schema#subClassOf> <https://mardi4nfdi.de/mathmoddb#Task> .
-                          ?answer a ?subclass .
-                          ?answer <http://www.w3.org/2000/01/rdf-schema#label> ?l .
-                          FILTER (lang(?l) = 'en')
-                         }
-                   GROUP BY ?answer ?label'''
-
-        req=requests.get('https://sparql.ta4.m1.mardi.ovh/mathalgodb/query',
-                         params = {'format': 'json', 'query': query},
-                         headers = {'User-Agent': 'MaRDMO_0.1 (https://zib.de; reidelbach@zib.de)'}).json()['results']['bindings']
-
-        dic = {}
-        
-        for r in req:
-            dic.update({r['label']['value']:{'id':r['answer']['value']}})
-
-        options = []
-        options.extend([{'id': dic[key]['id'] + ' <|> ' + key, 'text': key } for key in dic if search.lower() in key.lower()])
+        options = MathModDBProvider(search,queryProvider['T'])
         
         return options
 
@@ -965,43 +692,37 @@ class Task2(Provider):
 
     search = True
 
-    def get_options(self, project, search):
+    def get_options(self, project, search=None):
 
-        if not search or len(search) < 3:
+        if not search:
             return []
-
-        query = '''PREFIX : <https://mardi4nfdi.de/mathmoddb>
-                   SELECT DISTINCT ?subclass ?answer (GROUP_CONCAT(DISTINCT(?l); SEPARATOR=" / ") AS ?label)
-                   WHERE {
-                          ?subclass <http://www.w3.org/2000/01/rdf-schema#subClassOf> <https://mardi4nfdi.de/mathmoddb#Task> .
-                          ?answer a ?subclass .
-                          ?answer <http://www.w3.org/2000/01/rdf-schema#label> ?l .
-                          FILTER (lang(?l) = 'en')
-                         }
-                   GROUP BY ?subclass ?answer ?label'''
-
-        req=requests.get('https://sparql.ta4.m1.mardi.ovh/mathalgodb/query',
-                         params = {'format': 'json', 'query': query},
-                         headers = {'User-Agent': 'MaRDMO_0.1 (https://zib.de; reidelbach@zib.de)'}).json()['results']['bindings']
-
-        dic = {}
-
-        for r in req:
-            dic.update({r['label']['value']:{'id':r['answer']['value'],'subclass':r['subclass']['value'].split('#')[-1]}})
-
-        values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_6/Set_0/Question_0'))
-        values2 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_6/Set_0/Question_1'))
-
-        for idx, value1 in enumerate(values1):
-            if value1.text:
-                dic.update({value1.text:{'id':value1.external_id}})
-        for idx, value2 in enumerate(values2):
-            if value2.text:
-                dic.update({value2.text:{'id':str(idx)}})
-
-        options = []
-        options.extend([{'id': dic[key]['id'] + ' <|> ' + key if len(dic[key]['id'].split(' <|> ')) == 1 else dic[key]['id'], 'text': key } for key in dic if search.lower() in key.lower()])
         
+        # Fetch mathematical models from the MathModDB knowledge graph
+        results = queryMathModDB(queryProvider['T'])
+        
+        # Extract options from the knowledge graph
+        dic = {}
+        options = []
+        
+        for result in results:
+            dic.update({result['label']['value']:{'id':result['answer']['value']}})
+
+        # Fetch user-defined research fields from the project
+        values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_6/Set_0/Question_0'))
+        values2 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_6/Set_0/Question_1'))
+
+        for value1 in values1: 
+            if value1.text:
+                dic.update({value1.text: {'id': value1.external_id}})
+
+        for idx, value2 in enumerate(values2): 
+            if value2.text:
+                dic.update({value2.text: {'id': f"{idx} <|> {value2.text}"}})
+
+        options.extend([{'id': f"{dic[key]['id']} <|> {key}", 'text': key } for key in dic if search.lower() in key.lower()])
+
+        options = sorted(options, key=lambda option: option['text'])
+
         return options
 
 class AllEntities(Provider):
@@ -1014,100 +735,95 @@ class AllEntities(Provider):
     def get_options(self, project, search=None):
         options =[]
 
-        values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3/Set_0/Set_0/Question_04'))
-        values2 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_0/Question_3'))
-        values3 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_0/Question_0'))
-        values4 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3/Set_0/Set_0/Question_05'))
-        values5 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_1/Question_5'))
-        values6 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_1/Question_0'))
-        values7 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3/Set_0/Set_0/Question_00'))
-        values8 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3/Set_0/Set_0/Question_01'))
-        values9 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_2/Question_0'))
-        values10 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_2/Set_1/Question_0'))
-        values11 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_2/Set_1/Question_1'))
-        values12 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3/Set_0/Set_0/Question_07'))
-        values13 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_3/Question_5'))
-        values14 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_3/Question_0'))
-        values15 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_5/Question_0'))
-        values16 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_5/Set_4/Question_0'))
-        values17 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_5/Set_4/Question_1'))
-        values18 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_6/Question_0'))
-        values19 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_6/Set_0/Question_0'))
-        values20 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_6/Set_0/Question_1'))
-        values21 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri='http://example.com/terms/domain/MaRDI/Section_3a/Set_3/Question_6'))
+        values1 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3/Set_0/Set_0/Question_04'))
+        values2 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_0/Question_3'))
+        values3 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_0/Question_0'))
+        values4 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3/Set_0/Set_0/Question_05'))
+        values5 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_1/Question_5'))
+        values6 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_1/Question_0'))
+        values9 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_2/Question_0'))
+        values10 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_2/Set_1/Question_0'))
+        values11 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_2/Set_1/Question_1'))
+        values12 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3/Set_0/Set_0/Question_07'))
+        values13 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_3/Question_5'))
+        values14 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_3/Question_0'))
+        values15 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_5/Question_0'))
+        values16 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_5/Set_4/Question_0'))
+        values17 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_5/Set_4/Question_1'))
+        values18 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_6/Question_0'))
+        values19 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_6/Set_0/Question_0'))
+        values20 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_6/Set_0/Question_1'))
+        values21 = project.values.filter(snapshot=None, attribute=Attribute.objects.get(uri=f'{BASE_URI}Section_3a/Set_3/Question_6'))
 
         for idx, value1 in enumerate(values1):
             if value1.text and value1.text != 'not in MathModDB':
-                options.append({'id':value1.external_id + ' (Research Field)','text':value1.text + ' (Research Field)'})
+                options.append({'id': f"{value1.external_id} <|> ResearchField <|> RF",'text': f"{value1.text} (Research Field)"})
         for idx, value2 in enumerate(values2):
             if value2.text:
-                options.append({'id':value2.external_id + ' (Research Field)','text':value2.text + ' (Research Field)'})
+                options.append({'id': f"{value2.external_id.split(' <|>')[:2]} <|> ResearchField <|> RF",'text': f"{value2.text} (Research Field)"})
         for idx, value3 in enumerate(values3):
             if value3.text:
-                options.append({'id':'RF'+str(idx+1) + ' <|> ' + value3.text + ' (Research Field)','text':value3.text + ' (Research Field)'})
+                options.append({'id': f"RF{str(idx+1)} <|> {value3.text} <|> ResearchField <|> RF",'text': f"{value3.text} (Research Field)"})
         for idx, value4 in enumerate(values4):
             if value4.text and value4.text != 'not in MathModDB':
-                options.append({'id':value4.external_id + ' (Research Problem)','text':value4.text + ' (Research Problem)'})
+                options.append({'id': f"{value4.external_id} <|> ResearchProblem <|> RP",'text': f"{value4.text} (Research Problem)"})
         for idx, value5 in enumerate(values5):
             if value5.text:
-                options.append({'id':value5.external_id + ' (Research Problem)','text':value5.text + ' (Research Problem)'})
+                options.append({'id': f"{' <|> '.join(value5.external_id.split(' <|>')[:2])} <|> ResearchProblem <|> RP",'text': f"{value5.text} (Research Problem)"})
         for idx, value6 in enumerate(values6):
             if value6.text:
-                options.append({'id':'RP'+str(idx+1) + ' <|> ' + value6.text + ' (Research Problem)','text':value6.text + ' (Research Problem)'})
-        for idx, value7 in enumerate(values7):
-            if value7.text:
-                options.append({'id':value7.external_id + ' (Mathematical Model)','text':value7.text + ' (Mathematical Model)'})
-        for idx, value8 in enumerate(values8):
-            if value8.text:
-                options.append({'id':'MMa'+str(idx+1) + ' <|> ' + value8.text + ' (Mathematical Model)','text':value8.text + ' (Mathematical Model)'})
+                options.append({'id': f"RP{str(idx+1)} <|> {value6.text} <|> ResearchProblem <|> RP",'text': f"{value6.text} (Research Problem)"})
         for idx, value9 in enumerate(values9):
             if value9.text:
-                options.append({'id':value9.external_id + ' (Mathematical Model)','text':value9.text + ' (Mathematical Model)'})
+                options.append({'id': f"{value9.external_id} <|> MathematicalModel <|> MM",'text': f"{value9.text} (Mathematical Model)"})
         for idx, value10 in enumerate(values10):
             if value10.text:
-                options.append({'id':value10.external_id + ' (Mathematical Model)','text':value10.text + ' (Mathematical Model)'})
+                options.append({'id': f"{' <|> '.join(value10.external_id.split(' <|>')[:2])} <|> MathematicalModel <|> MM",'text': f"{value10.text} (Mathematical Model)"})
         for idx, value11 in enumerate(values11):
             if value11.text:
-                options.append({'id':'MMb'+str(idx+1) + ' <|> ' + value11.text + ' (Mathematical Model)','text':value11.text + ' (Mathematical Model)'})
+                options.append({'id': f"MM{str(idx+1)} <|> {value11.text} <|> MathematicalModel <|> MM",'text': f"{value11.text} (Mathematical Model)"})
+        for idx, value12 in enumerate(values12):
+            if value12.text and value12.text != 'not in MathModDB':
+                Id,label,qqk = value12.external_id.split(' <|> ')
+                if qqk == 'Quantity':
+                    options.append({'id':f"{Id} <|> {label} <|> Quantity <|> QQK",'text':f"{label} (Quantity)"})
+                elif qqk == 'QuantityKind':
+                    options.append({'id':f"{Id} <|> {label} <|> QuantityKind <|> QQK",'text':f"{label} (Quantity Kind)"})    
         for idx, value21 in enumerate(values21):
-            if value21.option == Option.objects.get(uri=self.mathmoddb['Quantity']):
-                for idx, value12 in enumerate(values12):
-                    if value12.text and value12.text != 'not in MathModDB' and value21.set_index == value12.set_index:
-                        options.append({'id':value12.external_id,'text':value12.text})
+            if value21.option == Option.objects.get(uri=self.mathmoddb['QuantityClass']):
                 for idx, value13 in enumerate(values13):
-                    if value13.text and value21.set_index == value13.set_index:
-                        options.append({'id':value13.external_id + ' (Quantity)','text':value13.text + ' (Quantity)'})
+                    if value13.text and value21.set_prefix == value13.set_prefix:
+                        Id,label,quote = value13.external_id.split(' <|> ')
+                        options.append({'id': f"{' <|> '.join(value13.external_id.split(' <|>')[:2])} <|> Quantity <|> QQK",'text': f"{label} (Quantity)"})
                 for idx, value14 in enumerate(values14):
-                    if value14.text and value21.set_index == value14.set_index:
-                        options.append({'id':'Q'+str(idx+1) + ' <|> ' + value14.text + ' (Quantity)','text':value14.text + ' (Quantity)'})
-            elif value21.option == Option.objects.get(uri=self.mathmoddb['QuantityKind']):
-                for idx, value12 in enumerate(values12):
-                    if value12.text and value12.text != 'not in MathModDB' and value21.set_index == value12.set_index:
-                        options.append({'id':value12.external_id,'text':value12.text})
+                    if value14.text and value21.set_prefix == value14.set_prefix:
+                        options.append({'id': f"QQK{str(idx+1)} <|> {value14.text} <|> Quantity <|> QQK",'text': f"{value14.text} (Quantity)"})
+            elif value21.option == Option.objects.get(uri=self.mathmoddb['QuantityKindClass']):
                 for idx, value13 in enumerate(values13):
-                    if value13.text and value21.set_index == value13.set_index:
-                        options.append({'id':value13.external_id + ' (Quantity Kind)','text':value13.text + ' (Quantity Kind)'})
+                    if value13.text and value21.set_prefix == value13.set_prefix:
+                        Id,label,quote = value13.external_id.split(' <|> ')
+                        options.append({'id': f"{' <|> '.join(value13.external_id.split(' <|>')[:2])} <|> QuantityKind <|> QQK",'text': f"{label} (Quantity Kind)"})
                 for idx, value14 in enumerate(values14):
-                    if value14.text and value21.set_index == value14.set_index:
-                        options.append({'id':'QK'+str(idx+1) + ' <|> ' + value14.text + ' (Quantity Kind)','text':value14.text + ' (Quantity Kind)'})
+                    if value14.text and value21.set_prefix == value14.set_prefix:
+                        options.append({'id': f"QQK{str(idx+1)} <|> {value14.text} <|> QuantityKind <|> QQK",'text': f"{value14.text} (Quantity Kind)"})
         for idx, value15 in enumerate(values15):
             if value15.text and value15.text != 'not in MathModDB':
-                options.append({'id':value15.external_id + ' (Mathematical Formulation)','text':value15.text + ' (Mathematical Formulation)'})
+                options.append({'id': f"{value15.external_id} <|> MathematicalFormulation <|> MF",'text': f"{value15.text} (Mathematical Formulation)"})
         for idx, value16 in enumerate(values16):
             if value16.text:
-                options.append({'id':value16.external_id + ' (Mathematical Formulation)','text':value16.text + ' (Mathematical Formulation)'})
+                options.append({'id': f"{' <|> '.join(value16.external_id.split(' <|>')[:2])} <|> MathematicalFormulation <|> MF",'text': f"{value16.text} (Mathematical Formulation)"})
         for idx, value17 in enumerate(values17):
             if value17.text:
-                options.append({'id':'MF'+str(idx+1) + ' <|> ' + value17.text + ' (Mathematical Formulation)','text':value17.text + ' (Mathematical Formulation)'})
+                options.append({'id': f"MF{str(idx+1)} <|> {value17.text} <|> MathematicalFormulation <|> MF",'text': f"{value17.text} (Mathematical Formulation)"})
         for idx, value18 in enumerate(values18):
             if value18.text and value18.text != 'not in MathModDB':
-                options.append({'id':value18.external_id + ' (Task)','text':value18.text + ' (Task)'})
+                options.append({'id': f"{value18.external_id} <|> Task <|> T",'text': f"{value18.text} (Task)"})
         for idx, value19 in enumerate(values19):
             if value19.text:
-                options.append({'id':value19.external_id + ' (Task)','text':value19.text + ' (Task)'})
+                options.append({'id': f"{' <|> '.join(value19.external_id.split(' <|>')[:2])} <|> Task <|> T",'text': f"{value19.text} (Task)"})
         for idx, value20 in enumerate(values20):
             if value20.text:
-                options.append({'id':'T'+str(idx+1) + ' <|> ' + value20.text + ' (Task)','text':value20.text + ' (Task)'})
+                options.append({'id': f"T{str(idx+1)} <|> {value20.text} <|> Task <|> T",'text': f"{value20.text} (Task)"})
         
         return options
 
@@ -1165,4 +881,35 @@ def add_options(options, values, start_index, process_text_fn=None):
             if process_text_fn:
                 text = process_text_fn(text)
             options.append({'id': f'Environment{index}', 'text': text})
+    return options
+
+def MathModDBProvider(search,query):
+    """
+    Dynamic query of MathModDB, results as options for Provider.
+    """
+    if not search:
+        return []
+
+    # Fetch results from the MathModDB knowledge graph
+    results = queryMathModDB(query)
+    
+    dic = {}
+    options = []
+    
+    # Store results in dict
+    for result in results:
+        if result.get('class',{}).get('value'):
+            if result['class']['value'].split('#')[1] == 'Quantity':
+                dic.update({f"{result['label']['value']} (Quantity)":{'id':f"{result['answer']['value']} <|> {result['label']['value']} <|> Quantity"}})
+            elif result['class']['value'].split('#')[1] == 'QuantityKind':
+                dic.update({f"{result['label']['value']} (Quantity Kind)":{'id':f"{result['answer']['value']} <|> {result['label']['value']} <|> QuantityKind"}})
+        else:
+            dic.update({result['label']['value']:{'id':result['answer']['value']}})
+
+    # Filter results by user-defined search
+    options.extend([{'id': f"{dic[key]['id']} <|> {key}" if len(dic[key]['id'].split(' <|> ')) == 1 else dic[key]['id'], 'text': key } for key in dic if search.lower() in key.lower()])
+
+    # Add 'not in MathModDB' option
+    options = [{'id': 'not in MathModDB', 'text': 'not in MathModDB'}] + sorted(options, key=lambda option: option['text'])
+
     return options

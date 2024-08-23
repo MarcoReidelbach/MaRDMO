@@ -11,6 +11,9 @@ mardi_endpoint="https://query.staging.mardi4nfdi.org/proxy/wdqs/bigdata/namespac
 wikidata_endpoint="https://query.wikidata.org/sparql"
 wikidata_api="https://www.wikidata.org/w/api.php"
 
+#MathModDB SPARQL Endpoint
+mathmoddb_endpoint = 'https://sparql.mtsr2024.m1.mardi.ovh/mathalgodb/query'
+
 #SPARQL Prefixes
 wd = '<https://staging.mardi4nfdi.org/entity/>'
 wdt = '<https://staging.mardi4nfdi.org/prop/direct/>'

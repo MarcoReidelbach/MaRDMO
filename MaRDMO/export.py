@@ -1,31 +1,26 @@
 import re
 import requests
 import os, json
-import time
 
 from django.http import HttpResponse
-from django.shortcuts import redirect, render, reverse
+from django.shortcuts import render
 from django.utils.translation import gettext_lazy as _
 from django.template import Template, Context
 
 from rdmo.projects.exports import Export
-from rdmo.views.utils import ProjectWrapper
-from rdmo.views.templatetags import view_tags
 from rdmo.domain.models import Attribute
 
 from wikibaseintegrator import wbi_login, WikibaseIntegrator
 from wikibaseintegrator.datatypes import ExternalID, Item, String, Time, MonolingualText, Quantity
-from wikibaseintegrator.wbi_enums import ActionIfExists
 from wikibaseintegrator.wbi_config import config as wbi_config
 from wikibaseintegrator.models import Qualifiers
 
-from .para import *
-from .config import *
-from .citation import *
+from .para import questions, option
+from .config import mardi_wiki, mardi_endpoint, mardi_api
 from .id import *
-from .sparql import *
-from .handlers import *
-from .mathmoddb import *
+from .sparql import query_base, mini, mbody2, quote_sparql, res_obj_sparql, res_disc_sparql, mmsio_sparql
+from .handlers import Author_Search
+from .mathmoddb import ModelRetriever
 
 try:
     # Get login credentials if available 
@@ -58,7 +53,7 @@ class MaRDIExport(Export):
         answers ={}
         for label, info in questions.items():
             answers = self.get_answer(answers,**info)
-        
+                
        ###################################################################################################################################################
        ###################################################################################################################################################
        ##                                                                                                                                               ##
@@ -323,7 +318,7 @@ class MaRDIExport(Export):
 
 ### Refine User Answers via External Data Sources #################################################################################################################################################
                 
-                answers = self.refine(answers)
+                answers = self.refine(answers,mathmoddb)
                 answers = ModelRetriever(answers,mathmoddb) 
                 
 ### Integrate related Model in MaRDI KG ###########################################################################################################################################################
@@ -355,7 +350,7 @@ class MaRDIExport(Export):
                 for tkey in answers['Task']:
                     if answers['Task'][tkey].get('Include'):
                         for tkey2 in answers['Task'][tkey]['Other2']:
-                            tvar = answers['Task'][tkey]['Other2'][tkey2].split(' <|> ')[1].rsplit(' ',1)[0]
+                            tvar = answers['Task'][tkey]['Other2'][tkey2].split(' <|> ')[1]
                             for mkey in answers['MathematicalFormulation']:
                                 for mkey2 in answers['MathematicalFormulation'][mkey]['Element']:
                                     if answers['MathematicalFormulation'][mkey]['Element'][mkey2].get('Info',{}).get('Name'):
@@ -609,8 +604,8 @@ class MaRDIExport(Export):
             elif answers['Settings'].get('DocumentationType')  == option['Documentation'] or answers['Settings'].get('DocumentationType')  == option['Model']:
             
                 # Mathematical Model documentation soon be integrated
-                answers = self.refine(answers)
-               
+                answers = self.refine(answers,mathmoddb)
+                
                 # Evaluate user-defined Model Author Name
                 if answers['Creator'].get('Name'):
                     Surname, GivenName = answers['Creator']['Name'].split(',')
@@ -644,7 +639,7 @@ class MaRDIExport(Export):
 
         		# Query MathModDB and order Information
                 answers = ModelRetriever(answers,mathmoddb)
-        
+                
                 # Download Model Doucmentation as Markdown File
                 if answers['Settings']['Public'] == option['Local']:
 
@@ -954,11 +949,11 @@ class MaRDIExport(Export):
                         qids.append(self.entry(prop[1], prop[2], relations))
         return qids
 
-    def refine(self,answers):
+    def refine(self,answers,mathmoddb):
         '''This function takes user answers and performs SPARQL queries to MaRDI portal.'''
         
         entities = ['NonMathematicalDiscipline','Models','Software','DataSet','Method','Hardware','ExperimentalDevice','ResearchField',
-                    'ResearchProblem','AdditionalModel','MathematicalFormulation','Quantity','Task','PublicationModel']
+                    'ResearchProblem','MathematicalModel','MathematicalFormulation','Quantity','Task','PublicationModel']
 
         for entity in entities:
             for key in answers[entity]:
@@ -1017,11 +1012,13 @@ class MaRDIExport(Export):
                                 answers[entity][key]['SubProperty2'].update({ikey:{'ID':f"mardi:{mardiID}", 'Name':Name, 'Description':Description}})
                             else:
                                 answers[entity][key]['SubProperty2'].update({ikey:{'ID':ID, 'Name':Name, 'Description':Description}})
-                if answers[entity][key].get('MathModID'):
+                if answers[entity][key].get('MathModID') and answers[entity][key]['MathModID'] != 'not in MathModDB':
                     if type(answers[entity][key]['MathModID']) == str:
-                        if answers[entity][key]['MathModID'] != 'not in MathModDB':
-                            ID, Name = answers[entity][key]['MathModID'].split(' <|> ')
-                            answers[entity][key].update({'MathModID':ID,'Name':Name})
+                        INC = answers[entity][key]['MathModID'].split(' <|> ')
+                        if len(INC) == 3:
+                            answers[entity][key].update({'MathModID':INC[0],'Name':INC[1],'QorQK':mathmoddb[INC[2]+'Class']})
+                        else:
+                            answers[entity][key].update({'MathModID':INC[0],'Name':INC[1]})
                     else:
                         for ikey in answers[entity][key]['MathModID']:
                             ID, Name = answers[entity][key]['MathModID'][ikey].split(' <|> ')
@@ -1240,13 +1237,13 @@ class MaRDIExport(Export):
                             if collection_index:
                                 if len(value.set_prefix.split('|')) == 1:
                                     val[uName].setdefault(int(value.set_prefix), {}).setdefault(value.set_index, {}).setdefault(dName, {}).update({value.collection_index:value.option_uri})
-                                elif len(value.set_prefix.split('|')) == 2:
+                                elif len(value.set_prefix.split('|')) > 1:
                                     prefix = value.set_prefix.split('|')
                                     val[uName].setdefault(int(prefix[0]), {}).setdefault(value.set_index, {}).setdefault(dName, {}).update({value.collection_index:value.option_uri})
                             else:
                                 if len(value.set_prefix.split('|')) == 1:
                                     val[uName].setdefault(int(value.set_prefix), {}).setdefault(dName, {}).update({value.set_index:value.option_uri})
-                                elif len(value.set_prefix.split('|')) == 2:
+                                elif len(value.set_prefix.split('|')) > 1:
                                     prefix = value.set_prefix.split('|')
                                     val[uName].setdefault(int(prefix[0]), {}).setdefault(dName, {}).update({value.set_index:value.option_uri})
                         else:
@@ -1277,29 +1274,45 @@ class MaRDIExport(Export):
                             if external_id:
                                 if len(value.set_prefix.split('|')) == 1:
                                     val[uName].setdefault(int(value.set_prefix), {}).setdefault(dName, {}).update({value.set_index:value.external_id})
-                                elif len(value.set_prefix.split('|')) == 2:
+                                elif len(value.set_prefix.split('|')) > 1:
                                     prefix = value.set_prefix.split('|')
-                                    if 'Element' in dName:
+                                    if 'Element ' in dName:
                                         val[uName].setdefault(int(prefix[0]), {}).setdefault(dName.split(' ')[0], {}).setdefault(value.set_index, {}).update({dName.split(' ')[1]:value.external_id})
                                     else: 
                                         val[uName].setdefault(int(prefix[0]), {}).setdefault(dName, {}).update({value.set_index:value.external_id})
                             else:
                                 if len(value.set_prefix.split('|')) == 1: 
                                     val[uName].setdefault(int(value.set_prefix), {}).setdefault(dName, {}).update({value.set_index:value.text})
-                                elif len(value.set_prefix.split('|')) == 2:
+                                elif len(value.set_prefix.split('|')) > 1:
                                     prefix = value.set_prefix.split('|')
                                     val[uName].setdefault(int(prefix[0]), {}).setdefault(dName.split(' ')[0], {}).setdefault(value.set_index, {}).update({dName.split(' ')[1]:value.text})
                     else:
                         if collection_index:
                             if external_id:
-                                val[uName].setdefault(int(value.set_prefix), {}).setdefault(dName, {}).update({value.collection_index:value.external_id})
+                                if len(value.set_prefix.split('|')) == 1:
+                                    val[uName].setdefault(int(value.set_prefix), {}).setdefault(dName, {}).update({value.collection_index:value.external_id})
+                                elif len(value.set_prefix.split('|')) > 1:
+                                    prefix = value.set_prefix.split('|')
+                                    val[uName].setdefault(int(prefix[0]), {}).setdefault(dName, {}).update({value.collection_index:value.external_id})
                             else:
-                                val[uName].setdefault(int(value.set_prefix), {}).setdefault(dName, {}).update({value.collection_index:value.text})
+                                if len(value.set_prefix.split('|')) == 1:
+                                    val[uName].setdefault(int(value.set_prefix), {}).setdefault(dName, {}).update({value.collection_index:value.text})
+                                elif len(value.set_prefix.split('|')) > 1:
+                                    prefix = value.set_prefix.split('|')
+                                    val[uName].setdefault(int(prefix[0]), {}).setdefault(dName, {}).update({value.collection_index:value.text})
                         else:
                             if external_id:
-                                val[uName].setdefault(int(value.set_prefix), {}).update({dName:value.external_id})
+                                if len(value.set_prefix.split('|')) == 1:
+                                    val[uName].setdefault(int(value.set_prefix), {}).update({dName:value.external_id})
+                                elif len(value.set_prefix.split('|')) > 1:
+                                    prefix = value.set_prefix.split('|')
+                                    val[uName].setdefault(int(prefix[0]), {}).update({dName:value.external_id})
                             else:
-                                val[uName].setdefault(int(value.set_prefix), {}).update({dName:value.text})
+                                if len(value.set_prefix.split('|')) == 1:
+                                    val[uName].setdefault(int(value.set_prefix), {}).update({dName:value.text})
+                                elif len(value.set_prefix.split('|')) > 1:
+                                    prefix = value.set_prefix.split('|')
+                                    val[uName].setdefault(int(prefix[0]), {}).update({dName:value.text})    
                 else:
                     if set_index:
                         if collection_index:

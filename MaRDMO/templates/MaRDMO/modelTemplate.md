@@ -11,7 +11,7 @@
   **Date-Released**: YYYY-MM-DD  
   **Version**: Major.Minor.Patch
 
-{% for values in AllModels.values %}
+{% for values in MathematicalModel.values %}
 
 # Mathematical Model MM{{ forloop.counter }}: {{ values.Name }}
 
@@ -173,20 +173,6 @@ models: {{ models }}
 **Properties**: {% for value in values.Properties.values %} {% if value == IsLinear %} Is Linear {% elif value == IsNotLinear %} Is Not Linear {% endif %} {% if not forloop.last %}, {% endif %} {% endfor %}  
 **Task Type**: {% for value in values.TaskClass.values %} {% if value == ComputationalTask %} Computational Task {% endif %} {% endfor %}
 
-{% for value in values.RelationRP.values %}
-{% if forloop.counter == 1 %}
-
-&nbsp;
-
-**Relations to Research Problems**
-
-{% endif %}
-
-contained in Research Problem: {{ value }}
-
-{% endfor %}
-
-
 {% for value in values.RelationMM.values %}
 {% if forloop.counter == 1 %}
 
@@ -213,6 +199,7 @@ applies Mathematical Model: {{ value }}
 {% elif value.0 == ContainsOutput %} contains Output: {{ value.1 }}
 {% elif value.0 == ContainsObjective %} contains Objective: {{ value.1 }}
 {% elif value.0 == ContainsParameter %} contains Parameter: {{ value.1 }}
+{% elif value.0 == ContainsConstant %} contains Constant: {{ value.1 }}
 {% endif %}
 {% endfor %}
 
@@ -229,6 +216,8 @@ applies Mathematical Model: {{ value }}
 {% elif value.0 == Generalizes %} generalizes Task: {{ value.1 }}
 {% elif value.0 == DiscretizedBy %} discretized by Task: {{ value.1 }}
 {% elif value.0 == Discretizes %} discretizes Task: {{ value.1 }}
+{% elif value.0 == ContainedIn %} contained in Task: {{ value.1 }}
+{% elif value.0 == Contains %} contains Task: {{ value.1 }}
 {% elif value.0 == ApproximatedBy %} approximated by Task: {{ value.1 }}
 {% elif value.0 == Approximates %} approximates Task: {{ value.1 }}
 {% elif value.0 == LinearizedBy %} linearized by Task: {{ value.1 }}
@@ -459,18 +448,21 @@ contained in Field: {{ researchfield }}
 
 {% endfor %}
 
-# Quantity
+# Quantity / Quantity Kind
 
-{% for values in Quantity_refined.values %}
+{% for values in Quantity.values %}
 
-## Q{{ forloop.counter }}: {{ values.QName }}
+## QQK{{ forloop.counter }}: {{ values.Name }}
 
-**Description**: {{ values.QDescription }}
+**Description**: {{ values.Description }}
+**Class**: {% if values.QorQK == QuantityClass %} Quantity {% elif values.QorQK == QuantityKindClass %} Quantity Kind {% endif %} 
 **DOI**:{% if 'doi' in values.ID %} {{ values.ID|cut:"doi:" }} {% endif %}
 **MathModDB**:{% if values.MathModID and values.MathModID != 'not in MathModDB' %} {{ values.MathModID }} {% endif %}
 **WikiData**:{% if 'wikidata' in values.ID %} {{ values.ID|cut:"wikidata:" }} {% endif %}
 **MaRDI**:{% if 'mardi' in values.ID %} {{ values.ID|cut:"mardi:" }} {% endif %}
-**Properties**: {% for value in values.QProperties.values %} {% if value == IsDimensionless %} Is Dimensionless {% elif value == IsDimensional %} Is Dimensional {% elif value == IsLinear %} Is Linear {% elif value == IsNotLinear %} Is Not Linear {% endif %} {% if not forloop.last %}, {% endif %}{% endfor %}
+**Properties**: {% if values.Properties %} {% for value in values.Properties.values %} {% if value == IsDimensionless %} Is Dimensionless {% elif value == IsDimensional %} Is Dimensional {% elif value == IsLinear %} Is Linear {% elif value == IsNotLinear %} Is Not Linear {% endif %} {% if not forloop.last %}, {% endif %}{% endfor %} {% endif %}
+
+{% if values.QorQK == QuantityClass %}
 
 {% for values in values.RelationQQ.values %}
 {% if forloop.counter == 1 %}
@@ -534,20 +526,8 @@ contained in Field: {{ researchfield }}
 **Properties**:{% for value in values.Properties.values %} {% if value == IsConvex %} Is Convex {% elif value == IsNotConvex %} Is Not Convex {% elif value == IsDeterministic %} Is Deterministic {% elif value == IsStochastic %} Is Stochastic {% elif value == IsDimensionless %} Is Dimensionless {% elif value == IsDimensional %} Is Dimensional {% elif value == IsDynamic %} Is Dynamic {% elif value == IsStatic %} Is Static {% elif value == IsLinear %} Is Linear {% elif value == IsNotLinear %} Is Not Linear {% elif value == IsSpaceContinuous %} Is Space-Continuous {% elif value == IsSpaceDiscrete %} Is Space-Discrete {% elif value == IsSpaceIndependent %} Is Space-Independent {% elif value == IsTimeContinuous %} Is Time-Continuous {% elif value == IsTimeDiscrete %} Is Time-Discrete {% elif value == IsTimeIndependent %} Is Time-Independent {% endif %} {% if not forloop.last %}, {% endif %} {% endfor %}
 
 {% endif %}
-{% endfor %}
 
-# Quantity Kind
-
-{% for values in QuantityKind_refined.values %}
-
-## QK{{ forloop.counter }}: {{ values.QKName }}
-
-**Description**: {{ values.QKDescription }}
-**DOI**:{% if 'doi' in values.ID %} {{ values.ID|cut:"doi:" }} {% endif %}
-**MathModDB**:{% if values.MathModID and values.MathModID != 'not in MathModDB' %} {{ values.MathModID }} {% endif %}
-**WikiData**:{% if 'wikidata' in values.ID %} {{ values.ID|cut:"wikidata:" }} {% endif %}
-**MaRDI**:{% if 'mardi' in values.ID %} {{ values.ID|cut:"mardi:" }} {% endif %}
-**Properties**: {% for value in values.QKProperties.values %} {% if value == IsDimensionless %} Is Dimensionless {% elif value == IsDimensional %} Is Dimensional {% endif %} {% if not forloop.last %}, {% endif %}{% endfor %}
+{% elif values.QorQK == QuantityKindClass %}
 
 {% for values in values.RelationQKQK.values %}
 {% if forloop.counter == 1 %}
@@ -581,4 +561,5 @@ contained in Field: {{ researchfield }}
 {% endif %}
 {% endfor %}
 
+{% endif %}
 {% endfor %}

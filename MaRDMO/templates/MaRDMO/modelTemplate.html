@@ -8,15 +8,15 @@
          src="https://cdn.jsdelivr.net/npm/mathjax@3.0.0/es5/tex-mml-chtml.js">
  </script>
  <style>
-         table {{
+         table {
            margin-left: 0;
            margin-right: auto;
            margin-bottom: 24px;
            border-spacing: 0;
            border-bottom: 2px solid black;
            border-top: 2px solid black;
-         }}
-         table th {{
+         }
+         table th {
            padding: 3px 10px;
            background-color: white;
            border-top: none;
@@ -24,15 +24,15 @@
            border-right: 1px solid black;
            border-bottom: 1px solid black;
            text-align: center;
-         }}
-         table td {{
+         }
+         table td {
            padding: 3px 10px;
            border-top: 1px solid black;
            border-left: 1px solid black;
            border-bottom: 1px solid black;
            border-right: 1px solid black;
            text-align: center;
-         }}
+         }
 </style>
 </head>
 <body>
@@ -52,7 +52,7 @@
 
 <h1 id="MathematicalModel"> Mathematical Models </h1>
 
-{% for values in answers.AllModels.values %}
+{% for values in answers.MathematicalModel.values %}
 
     <h2 id="MM{{ forloop.counter }}"> MM{{ forloop.counter }}: {{ values.Name }} </h2>
 
@@ -374,13 +374,6 @@
 		      {% endfor %}
     </p>
 
-    {% for value in values.RelationRP.values %}
-        {% if forloop.counter == 1 %}
-	    <h3 id="RelationsToResearchProblems2"> Relations to Research Problems </h3>
-        {% endif %}
-        contained in Research Problem: {{ value }}
-    {% endfor %}
-
     {% for value in values.RelationMM.values %}
         {% if forloop.counter == 1 %}
 	    <h3 id="RelationsToMathematicalModels2"> Relations to Mathematical Models </h3>
@@ -400,6 +393,8 @@
 	    contains Objective: {{ value.1 }} <br>
         {% elif value.0 == option.ContainsParameter %} 
 	    contains Parameter: {{ value.1 }} <br>
+	{% elif value.0 == option.ContainsConstant %}
+            contains Constant: {{ value.1 }} <br>
         {% endif %}
     {% endfor %}
 
@@ -415,6 +410,10 @@
 	    discretized by Task: {{ value.1 }} <br>
         {% elif value.0 == option.Discretizes %} 
 	    discretizes Task: {{ value.1 }} <br>
+        {% elif value.0 == option.ContainedIn %} 
+	    contained in Task: {{ value.1 }} <br>
+        {% elif value.0 == option.Contains %} 
+	    contains Task: {{ value.1 }} <br>
         {% elif value.0 == option.ApproximatedBy %} 
 	    approximated by Task: {{ value.1 }} <br>
         {% elif value.0 == option.Approximates %} 
@@ -763,255 +762,234 @@
     {% endfor %}
 {% endfor %}
 
-<h1 id="Quantity"> Quantities </h1>
+<h1 id="QuantityQuantityKind"> Quantities / Quantity Kinds </h1>
 
-{% for values in answers.Quantity_refined.values %}
+{% for values in answers.Quantity.values %}
 
-    <h2 id="Q{{ forloop.counter }}"> Q{{ forloop.counter }}: {{ values.QName }} </h2>
+    <h2 id="QQK{{ forloop.counter }}"> QQK{{ forloop.counter }}: {{ values.Name }} </h2>
 
     <p>
-        <b>Description</b>: {{ values.QDescription }} <br>
+        <b>Description</b>: {{ values.Description }} <br>
+        <b>Class</b>: {% if values.QorQK == option.QuantityClass %}
+                          Quantity
+                      {% elif values.QorQK == option.QuantityKindClass %}
+                          Quantity Kind
+                      {% endif %} <br>
         <b>DOI</b>: {% if 'doi' in values.ID %} 
                         {{ values.ID|cut:"doi:" }} 
-	   	    {% endif %} <br>
+	   	            {% endif %} <br>
         <b>MathModDB</b>: {% if values.MathModID and values.MathModID != 'not in MathModDB' %} 
                               {{ values.MathModID }} 
-		          {% endif %} <br>
+		                  {% endif %} <br>
         <b>WikiData</b>: {% if 'wikidata' in values.ID %} 
                              {{ values.ID|cut:"wikidata:" }} 
-	                 {% endif %} <br>
+	                     {% endif %} <br>
         <b>MaRDI</b>: {% if 'mardi' in values.ID %} 
                           {{ values.ID|cut:"mardi:" }} 
-		      {% endif %} <br>
-        <b>Properties</b>: {% for value in values.QProperties.values %} 
-                               {% if value == option.IsDimensionless %} 
-			           Is Dimensionless 
-			       {% elif value == option.IsDimensional %} 
-			           Is Dimensional 
-			       {% elif value == option.IsLinear %} 
-			           Is Linear 
-			       {% elif value == option.IsNotLinear %} 
-			           Is Not Linear
-			       {% endif %} 
-			       {% if not forloop.last %}
-			           , 
-			       {% endif %}
-		           {% endfor %}
+		              {% endif %} <br>
+        <b>Properties</b>: {% if values.Properties %}
+                            {% for value in values.Properties.values %} 
+                                {% if value == option.IsDimensionless %} 
+			                        Is Dimensionless 
+			                    {% elif value == option.IsDimensional %} 
+			                        Is Dimensional 
+			                    {% elif value == option.IsLinear %} 
+			                        Is Linear 
+			                    {% elif value == option.IsNotLinear %} 
+			                        Is Not Linear
+			                    {% endif %} 
+			                    {% if not forloop.last %}
+			                       , 
+			                    {% endif %}
+                            {% endfor %}
+                           {% endif %}
     </p>
 
-    {% for values in values.RelationQQ.values %}
-        {% if forloop.counter == 1 %}
-	    <h3 id="RelationsToOtherQuantities"> Relations to other Quantities </h3>
-        {% endif %}
-        {% if values.0 == option.GeneralizedBy %} 
-	    generalized by Quantity: {{ values.1 }} <br>
-        {% elif values.0 == option.Generalizes %} 
-	    generalizes Quantity: {{ values.1 }} <br>
-        {% elif values.0 == option.ApproximatedBy %} 
-	    approximated by Quantity: {{ values.1 }} <br>
-        {% elif values.0 == option.Approximates %} 
-	    approximates Quantity: {{ values.1 }} <br>
-        {% elif values.0 == option.LinearizedBy %} 
-	    linearized by Quantity: {{ values.1 }} <br>
-        {% elif values.0 == option.Linearizes %} 
-	    linearizes Quantity: {{ values.1 }} <br>
-        {% elif values.0 == option.NondimensionalizedBy %} 
-	    nondimensionalized by Quantity: {{ values.1 }} <br>
-        {% elif values.0 == option.Nondimensionalizes %} 
-	    nondimensionalizes Quantity: {{ values.1 }} <br>
-        {% elif values.0 == option.SimilarTo %} 
-	    similar to Quantity: {{ values.1 }} <br>
-        {% endif %}
-    {% endfor %}
+    {% if values.QorQK == option.QuantityClass %}
 
-    {% for values in values.RelationQQK.values %}
-        {% if forloop.counter == 1 %}
-	    <h3 id="RelationsToQuantityKinds"> Relations to Quantity Kinds </h3>
-        {% endif %}
-        {% if values.0 == option.GeneralizedBy %} 
-	    generalized by Quantity Kind: {{ values.1 }} <br>
-        {% elif values.0 == option.Generalizes %} 
-	    generalizes Quantity Kind: {{ values.1 }} <br>
-        {% elif values.0 == option.NondimensionalizedBy %} 
-	    nondimensionalized by Quantity Kind: {{ values.1 }} <br>
-        {% elif values.0 == option.Nondimensionalizes %} 
-	    nondimensionalizes Quantity Kind: {{ values.1 }} <br>
-        {% elif values.0 == option.SimilarTo %} 
-	    similar to Quantity Kind: {{ values.1 }} <br>
-        {% endif %}
-    {% endfor %}
+        {% for values in values.RelationQQ.values %}
+            {% if forloop.counter == 1 %}
+	            <h3 id="RelationsToOtherQuantities"> Relations to other Quantities </h3>
+            {% endif %}
+            {% if values.0 == option.GeneralizedBy %} 
+	            generalized by Quantity: {{ values.1 }} <br>
+            {% elif values.0 == option.Generalizes %} 
+	            generalizes Quantity: {{ values.1 }} <br>
+            {% elif values.0 == option.ApproximatedBy %} 
+	            approximated by Quantity: {{ values.1 }} <br>
+            {% elif values.0 == option.Approximates %} 
+	            approximates Quantity: {{ values.1 }} <br>
+            {% elif values.0 == option.LinearizedBy %} 
+	            linearized by Quantity: {{ values.1 }} <br>
+            {% elif values.0 == option.Linearizes %} 
+	            linearizes Quantity: {{ values.1 }} <br>
+            {% elif values.0 == option.NondimensionalizedBy %} 
+	            nondimensionalized by Quantity: {{ values.1 }} <br>
+            {% elif values.0 == option.Nondimensionalizes %} 
+	            nondimensionalizes Quantity: {{ values.1 }} <br>
+            {% elif values.0 == option.SimilarTo %} 
+	            similar to Quantity: {{ values.1 }} <br>
+            {% endif %}
+        {% endfor %}
 
-    {% if values.MDef %}
+        {% for values in values.RelationQQK.values %}
+            {% if forloop.counter == 1 %}
+	            <h3 id="RelationsToQuantityKinds"> Relations to Quantity Kinds </h3>
+            {% endif %}
+            {% if values.0 == option.GeneralizedBy %} 
+	            generalized by Quantity Kind: {{ values.1 }} <br>
+            {% elif values.0 == option.Generalizes %} 
+	            generalizes Quantity Kind: {{ values.1 }} <br>
+            {% elif values.0 == option.NondimensionalizedBy %} 
+	            nondimensionalized by Quantity Kind: {{ values.1 }} <br>
+            {% elif values.0 == option.Nondimensionalizes %} 
+	            nondimensionalizes Quantity Kind: {{ values.1 }} <br>
+            {% elif values.0 == option.SimilarTo %} 
+	            similar to Quantity Kind: {{ values.1 }} <br>
+            {% endif %}
+        {% endfor %}
 
-        <h2 id="DefinitionOfQuantity"> Definition of Quantity </h2>
+        {% if values.MDef %}
 
-	<p>
-	    <b>Name</b>: {{ values.MDef.Name }} <br>
-	    <b>Description</b>: {{ values.MDef.Description }} <br>
-	    <b>MathModDB</b>: {% if values.MDef.MathModID and values.MDef.MathModID != 'not in MathModDB' %} 
-	                          {{ values.MDef.MathModID }} 
-			      {% endif %} <br>
-	    <b>WikiData</b>: {% if 'wikidata' in values.MDef.ID %} 
-	                         {{ values.MDef.ID|cut:"wikidata:" }} 
-			     {% endif %} <br>
-	    <b>MaRDI</b>: {% if 'mardi' in values.MDef.ID %} 
-	                      {{ values.MDef.ID|cut:"mardi:" }} 
-		          {% endif %} <br>
-        </p>
-	<p>
-            <b>Defining formulations</b>: {%for value in values.MDef.Formula.values %} 
-	                                      {{ value }} 
-					      {% if not forloop.last %}
-					          , 
-					      {% endif %} 
-					  {% endfor %}
-        </p>
-        <br>
-        <table border="1">
-            <colgroup>
-                <col style="width: 10%" />
-                <col style="width: 15%" />
-                <col style="width: 15%" />
-                <col style="width: 15%" />
-                <col style="width: 15%" />
-                <col style="width: 30%" />
-            </colgroup>
-            <thead>
-                <tr class="header">
-                    <th style="text-align: center; vertical-align: middle;">Symbol</th>
-                    <th style="text-align: center; vertical-align: middle;">Quantity</th>
-                    <th style="text-align: center; vertical-align: middle;">Quantity ID</th>
-                    <th style="text-align: center; vertical-align: middle;">Quantity Kind</th>
-                    <th style="text-align: center; vertical-align: middle;">Quantity Kind ID</th>
-                    <th style="text-align: center; vertical-align: middle;">Description</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for value in values.MDef.Element.values %}
-                    <tr>
-                        <td style="text-align: center; vertical-align: middle;">{{ value.Symbol }}</td>
-                        <td style="text-align: center; vertical-align: middle;">{% if value.Info %}
-                                                                                    {{ value.Info.Name }}
-                                                                                {% else %}
-                                                                                    {{ value.Quantity }}
-                                                                                {% endif %}</td>
-                        <td style="text-align: center; vertical-align: middle;">{{ value.Info.QID }}</td>
-                        <td style="text-align: center; vertical-align: middle;">{{ value.Info.QKName }}</td>
-                        <td style="text-align: center; vertical-align: middle;">{{ value.Info.QKID }}</td>
-                        <td style="text-align: center; vertical-align: middle;">{{ value.Info.Description }}</td>
+            <h2 id="DefinitionOfQuantity"> Definition of Quantity </h2>
+
+	        <p>
+	            <b>Name</b>: {{ values.MDef.Name }} <br>
+	            <b>Description</b>: {{ values.MDef.Description }} <br>
+	            <b>MathModDB</b>: {% if values.MDef.MathModID and values.MDef.MathModID != 'not in MathModDB' %} 
+	                                  {{ values.MDef.MathModID }} 
+			                      {% endif %} <br>
+	            <b>WikiData</b>: {% if 'wikidata' in values.MDef.ID %} 
+	                                 {{ values.MDef.ID|cut:"wikidata:" }} 
+			                     {% endif %} <br>
+	            <b>MaRDI</b>: {% if 'mardi' in values.MDef.ID %} 
+	                              {{ values.MDef.ID|cut:"mardi:" }} 
+		                      {% endif %} <br>
+            </p>
+	        <p>
+                <b>Defining formulations</b>: {%for value in values.MDef.Formula.values %} 
+                                                  \( {{ value|cut:"$$" }} \) 
+					                              {% if not forloop.last %}
+					                                , 
+					                              {% endif %} 
+					                          {% endfor %}
+            </p>
+            <br>
+            <table border="1">
+                <colgroup>
+                    <col style="width: 10%" />
+                    <col style="width: 15%" />
+                    <col style="width: 15%" />
+                    <col style="width: 15%" />
+                    <col style="width: 15%" />
+                    <col style="width: 30%" />
+                </colgroup>
+                <thead>
+                    <tr class="header">
+                        <th style="text-align: center; vertical-align: middle;">Symbol</th>
+                        <th style="text-align: center; vertical-align: middle;">Quantity</th>
+                        <th style="text-align: center; vertical-align: middle;">Quantity ID</th>
+                        <th style="text-align: center; vertical-align: middle;">Quantity Kind</th>
+                        <th style="text-align: center; vertical-align: middle;">Quantity Kind ID</th>
+                        <th style="text-align: center; vertical-align: middle;">Description</th>
                     </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-        <br>
-        <b>Properties</b>: {% for value in values.MDef.Properties.values %}
-                               {% if value == option.IsConvex %}
-                                   Is Convex
-                               {% elif value == option.IsNotConvex %}
-                                   Is Not Convex
-                               {% elif value == option.IsDeterministic %}
-                                   Is Deterministic
-                               {% elif value == option.IsStochastic %}
-                                   Is Stochastic
-                               {% elif value == option.IsDimensionless %}
-                                   Is Dimensionless
-                               {% elif value == option.IsDimensional %}
-                                   Is Dimensional
-                               {% elif value == option.IsDynamic %}
-                                   Is Dynamic
-                               {% elif value == option.IsStatic %}
-                                   Is Static
-                               {% elif value == option.IsLinear %}
-                                   Is Linear
-                               {% elif value == option.IsNotLinear %}
-                                   Is Not Linear
-                               {% elif value == option.IsSpaceContinuous %}
-                                   Is Space-Continuous
-                               {% elif value == option.IsSpaceDiscrete %}
-                                   Is Space-Discrete
-                               {% elif value == option.IsSpaceIndependent %}
-                                   Is Space-Independent
-                               {% elif value == option.IsTimeContinuous %}
-                                   Is Time-Continuous
-                               {% elif value == option.IsTimeDiscrete %}
-                                   Is Time-Discrete
-                               {% elif value == option.IsTimeIndependent %}
-                                   Is Time-Independent
-                               {% endif %}
-                               {% if not forloop.last %}
-                                   ,
-                               {% endif %}
-                           {% endfor %}
+                </thead>
+                <tbody>
+                    {% for value in values.MDef.Element.values %}
+                        <tr>
+                            <td style="text-align: center; vertical-align: middle;">{{ value.Symbol }}</td>
+                            <td style="text-align: center; vertical-align: middle;">{% if value.Info %}
+                                                                                        {{ value.Info.Name }}
+                                                                                    {% else %}
+                                                                                        {{ value.Quantity }}
+                                                                                    {% endif %}</td>
+                            <td style="text-align: center; vertical-align: middle;">{{ value.Info.QID }}</td>
+                            <td style="text-align: center; vertical-align: middle;">{{ value.Info.QKName }}</td>
+                            <td style="text-align: center; vertical-align: middle;">{{ value.Info.QKID }}</td>
+                            <td style="text-align: center; vertical-align: middle;">{{ value.Info.Description }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            <br>
+            <b>Properties</b>: {% for value in values.MDef.Properties.values %}
+                                   {% if value == option.IsConvex %}
+                                       Is Convex
+                                   {% elif value == option.IsNotConvex %}
+                                       Is Not Convex
+                                   {% elif value == option.IsDeterministic %}
+                                       Is Deterministic
+                                   {% elif value == option.IsStochastic %}
+                                       Is Stochastic
+                                   {% elif value == option.IsDimensionless %}
+                                       Is Dimensionless
+                                   {% elif value == option.IsDimensional %}
+                                       Is Dimensional
+                                   {% elif value == option.IsDynamic %}
+                                       Is Dynamic
+                                   {% elif value == option.IsStatic %}
+                                       Is Static
+                                   {% elif value == option.IsLinear %}
+                                       Is Linear
+                                   {% elif value == option.IsNotLinear %}
+                                       Is Not Linear
+                                   {% elif value == option.IsSpaceContinuous %}
+                                       Is Space-Continuous
+                                   {% elif value == option.IsSpaceDiscrete %}
+                                       Is Space-Discrete
+                                   {% elif value == option.IsSpaceIndependent %}
+                                       Is Space-Independent
+                                   {% elif value == option.IsTimeContinuous %}
+                                       Is Time-Continuous
+                                   {% elif value == option.IsTimeDiscrete %}
+                                       Is Time-Discrete
+                                   {% elif value == option.IsTimeIndependent %}
+                                       Is Time-Independent
+                                   {% endif %}
+                                   {% if not forloop.last %}
+                                       ,
+                                   {% endif %}
+                               {% endfor %}
+        {% endif %}
 
+    {% elif values.QorQK == option.QuantityKindClass %}
+
+        {% for values in values.RelationQKQK.values %}
+            {% if forloop.counter == 1 %}
+                <h3 id="RelationsToOtherQuantityKinds"> Relations to other Quantity Kinds </h3>
+            {% endif %}
+            {% if values.0 == option.GeneralizedBy %} 
+                generalized by Quantity Kind: {{ values.1 }} <br>
+            {% elif values.0 == option.Generalizes %} 
+                generalizes Quantity Kind: {{ values.1 }} <br>
+            {% elif values.0 == option.NondimensionalizedBy %} 
+                nondimensionalized by Quantity Kind: {{ values.1 }} <br>
+            {% elif values.0 == option.Nondimensionalizes %} 
+                nondimensionalizes Quantity Kind: {{ values.1 }} <br>
+            {% elif values.0 == option.SimilarTo %} 
+                similar to Quantity Kind: {{ values.1 }} <br>
+            {% endif %}
+        {% endfor %}
+
+        {% for values in values.RelationQKQ.values %}
+            {% if forloop.counter == 1 %}
+                <h3 id="RelationsToOtherQuantities3"> Relations to Quantities </h3>
+            {% endif %}
+            {% if values.0 == option.GeneralizedBy %} 
+                generalized by Quantity: {{ values.1 }} <br>
+            {% elif values.0 == option.Generalizes %} 
+                generalizes Quantity: {{ values.1 }} <br>
+            {% elif values.0 == option.NondimensionalizedBy %} 
+                nondimensionalized by Quantity: {{ values.1 }} <br>
+            {% elif values.0 == option.Nondimensionalizes %} 
+                nondimensionalizes Quantity: {{ values.1 }} <br>
+            {% elif values.0 == option.SimilarTo %} 
+                similar to Quantity: {{ values.1 }} <br>
+            {% endif %}
+        {% endfor %}
     {% endif %}
 {% endfor %}
 
-<h1 id="QuantityKind"> Quantity Kinds </h1>
-
-{% for values in answers.QuantityKind_refined.values %}
-
-    <h2 id="QK{{ forloop.counter }}"> QK{{ forloop.counter }}: {{ values.QKName }} </h2>
-    
-    <p>
-    <b>Description</b>: {{ values.QKDescription }} <br>
-    <b>DOI</b>: {% if 'doi' in values.ID %} 
-                    {{ values.ID|cut:"doi:" }} 
-		{% endif %} <br>
-    <b>MathModDB</b>: {% if values.MathModID and values.MathModID != 'not in MathModDB' %} 
-                          {{ values.MathModID }} 
-		      {% endif %} <br>
-    <b>WikiData</b>: {% if 'wikidata' in values.ID %} 
-                         {{ values.ID|cut:"wikidata:" }} 
-	             {% endif %} <br>
-    <b>MaRDI</b>: {% if 'mardi' in values.ID %} 
-                      {{ values.ID|cut:"mardi:" }} 
-		  {% endif %} <br>
-    <b>Properties</b>: {% for value in values.QKProperties.values %} 
-                           {% if value == IsDimensionless %} 
-			       Is Dimensionless 
-			   {% elif value == IsDimensional %} 
-			       Is Dimensional 
-			   {% endif %} 
-			   {% if not forloop.last %}
-			       , 
-			   {% endif %}
-		       {% endfor %}
-
-    {% for values in values.RelationQKQK.values %}
-        {% if forloop.counter == 1 %}
-	    <h3 id="RelationsToOtherQuantityKinds"> Relations to other Quantity Kinds </h3>
-        {% endif %}
-        {% if values.0 == option.GeneralizedBy %} 
-	    generalized by Quantity Kind: {{ values.1 }} <br>
-        {% elif values.0 == option.Generalizes %} 
-	    generalizes Quantity Kind: {{ values.1 }} <br>
-        {% elif values.0 == option.NondimensionalizedBy %} 
-	    nondimensionalized by Quantity Kind: {{ values.1 }} <br>
-        {% elif values.0 == option.Nondimensionalizes %} 
-	    nondimensionalizes Quantity Kind: {{ values.1 }} <br>
-        {% elif values.0 == option.SimilarTo %} 
-	    similar to Quantity Kind: {{ values.1 }} <br>
-        {% endif %}
-    {% endfor %}
-
-    {% for values in values.RelationQKQ.values %}
-        {% if forloop.counter == 1 %}
-	    <h3 id="RelationsToOtherQuantities3"> Relations to Quantities </h3>
-        {% endif %}
-        {% if values.0 == option.GeneralizedBy %} 
-	    generalized by Quantity: {{ values.1 }} <br>
-        {% elif values.0 == option.Generalizes %} 
-	    generalizes Quantity: {{ values.1 }} <br>
-        {% elif values.0 == option.NondimensionalizedBy %} 
-	    nondimensionalized by Quantity: {{ values.1 }} <br>
-        {% elif values.0 == option.Nondimensionalizes %} 
-	    nondimensionalizes Quantity: {{ values.1 }} <br>
-        {% elif values.0 == option.SimilarTo %} 
-	    similar to Quantity: {{ values.1 }} <br>
-        {% endif %}
-    {% endfor %}
-
-{% endfor %}
 </body>
 
 {% endblock %}

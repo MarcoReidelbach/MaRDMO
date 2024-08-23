@@ -1,9 +1,8 @@
-from django.http import HttpResponse
 import requests, re, os, json
-from pylatexenc.latex2text import LatexNodes2Text
 import bibtexparser
+
+from pylatexenc.latex2text import LatexNodes2Text
 from langdetect import detect
-from .para import * 
 
 def GetCitation(doi):
     '''Function gets citation by DOI'''  
