@@ -45,7 +45,7 @@ To use the MaRDMO-Export-Plugin at least `RDMO v2.0.0` is required. Follow the i
 Go to the `rdmo-app` directory of your RDMO installation. In the virtual environment of the RDMO installation install the MaRDMO Plugin:
 
 ```bash
-pip install git+https://github.com/MarcoReidelbach/MaRDMO-Export-Plugin
+pip install git+https://github.com/MarcoReidelbach/MaRDMO-Plugin
 ```
 
 To connect the MaRDMO Plugin with the RDMO installation add the following lines to `config/settings/local.py` (if not already present):
